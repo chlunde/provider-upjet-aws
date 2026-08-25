@@ -18,58 +18,73 @@ linux/amd64, `go build` with the repo's default flags.
 
 ## Summary
 
-**Roughly 90% of the resident memory is the executable image itself, not the
-heap.** After the whole startup path has run — every API group registered, the
-Terraform AWS provider constructed, both cluster-scoped and namespaced
-`config.Provider`s built — live Go heap is only about **69 MiB**, while RSS is
-about **1.0 GiB**, of which the overwhelming majority is text and rodata paged
-in from the binary.
+Resident memory has two roughly equal halves, and they need different fixes.
+With the whole startup path run — every API group registered, the Terraform AWS
+provider constructed, both scoped `config.Provider`s built — `smaps_rollup`
+reports:
+
+| | | |
+| --- | ---: | --- |
+| `Private_Clean` | **692 MB** | executable text and rodata paged in from the binary |
+| `Anonymous` | **386 MB** | the Go heap arena, of which only **51.5 MB is live data** |
+| `Rss` | **1,079 MB** | |
+
+Neither half is the live object graph. The first half is code the family binary
+links but never runs; the second is arena grown to absorb the garbage thrown off
+while parsing 22 MB of embedded JSON and YAML into 1,029 resource
+configurations, twice.
 
 That is why safe-start does not help. Safe-start gates *controller startup* on
 CRD existence, and MRAP controls *which CRDs exist*. Both work, and both are
 already wired up here (`spec.capabilities: [SafeStart]` in
 `package/crossplane.yaml.tmpl`, the `customresourcesgate` plumbing in
 `cmd/provider/*/zz_main.go`). But an unstarted controller was never the
-expensive thing. The expensive thing is that every family binary links, and
-therefore pages in, the API types of all 178 API groups in both scopes and the
-Terraform provider and AWS SDK client for all ~270 AWS services.
+expensive thing.
 
-To make memory scale with the started types, the binary has to get smaller.
+The same startup work costs **25 seconds of wall clock**, of which 24 seconds is
+the two `config.Provider` builds. Everything else — registering 8,488 GVKs,
+constructing the Terraform provider, and all the package `init` work before
+`main` — totals about 330 ms.
 
 ## Measurements
 
-### Resident memory is file-backed, not heap
+### Startup, step by step
 
-`hack/memprofile/startup` walks the same sequence as `cmd/provider/<family>/zz_main.go`:
-
-```
-0. process start (binary linked, inits run)      live=    20.2 MiB   RSS=  606.6
-1. clusterapis.AddToScheme                       live=    22.2 MiB   RSS=  610.9
-2. namespacedapis.AddToScheme                    live=    24.1 MiB   RSS=  613.0
-3. apiextensionsv1.AddToScheme                   live=    24.1 MiB   RSS=  613.1
-4. xpprovider.GetProvider (TF SDKv2 + FW)        live=    30.8 MiB   RSS=  662.4
-5. config.GetProvider (cluster)                  live=    56.3 MiB   RSS=  837.3
-6. config.GetProviderNamespaced                  live=    68.7 MiB   RSS= 1058.0   peak 1067.6
-```
-
-Two things stand out.
-
-* **RSS is already 607 MiB before a single line of provider logic runs.** That
-  is the cost of having the code in the binary: package `init` functions across
-  thousands of packages, plus the runtime touching text, rodata and pclntab.
-* **The entire startup path only adds ~49 MiB of live heap.** Scheme
-  registration for all 8,488 GVKs costs 4 MiB. The two `config.Provider`s cost
-  38 MiB between them.
-
-`smaps_rollup` confirms the split. For a program that links only
-terraform-provider-aws and does nothing else:
+`hack/memprofile/startup` walks the same sequence as `cmd/provider/<family>/zz_main.go`,
+timing each step's work separately from the collections it forces around each
+reading:
 
 ```
-Rss: 388644 kB | Private_Clean: 348772 kB | Anonymous: 38236 kB
+                                            live heap    RSS     took
+0. process start (binary linked, inits run)     20.2    621.2       0s
+1. clusterapis.AddToScheme                      22.2    625.8      44ms
+2. namespacedapis.AddToScheme                   24.1    628.0      39ms
+3. apiextensionsv1.AddToScheme                  24.1    628.0       0s
+4. xpprovider.GetProvider (TF SDKv2 + FW)       30.8    686.8      63ms
+5. config.GetProvider (cluster)                 47.7    854.9   16.864s
+6. config.GetProviderNamespaced                 51.5   1064.9    7.029s
+
+time from exec to main()  180ms
+time in the startup path  24.038s
 ```
 
-`Anonymous` — the actual heap and stacks — is 38 MiB. `Private_Clean` — pages
-faulted in from the executable — is 349 MiB.
+Three things stand out.
+
+* **RSS is already 621 MB before a single line of provider logic runs**, and
+  reaching that point costs only 180 ms. That is the price of having the code in
+  the binary, not of executing it.
+* **Registering all 8,488 GVKs across both scopes costs 4 MiB and 83 ms.** The
+  scheme is not where either budget goes.
+* **The two `config.Provider` builds cost 24 of the 25 seconds**, and take RSS
+  from 687 MB to 1,065 MB.
+
+The asymmetry between steps 5 and 6 — 16.9 s against 7.0 s for identical work —
+is not noise. Both providers share one `sdkProvider`, and upjet's `NewProvider`
+materialises lazy schemas by assigning into it:
+`terraformResource.Schema = terraformResource.SchemaFunc()`. The first pass pays
+for ~1,000 `SchemaFunc()` calls and mutates the shared resources; the second
+finds `Schema` already non-nil and skips them. So roughly 10 seconds of startup
+is schema materialisation that a per-family include list would mostly avoid.
 
 ### Link cost per package set
 
@@ -164,11 +179,16 @@ packages and `internal/conns/awsclient_gen.go` imports all 266
   added specifically to avoid materialising schemas it does not need — and runs
   the schema traversers and reference injectors over all of them.
 
-An EC2 binary needs 104 of those 1,029. All of it happens twice, once per scope.
-It is also the only part of startup with a large transient: during
-`config.GetProvider` the process peaks at 1034 MiB of RSS while settling at
-837 MiB, a ~197 MiB spike that a container limit has to absorb but that nothing
-is using a moment later.
+An EC2 binary needs 104 of those 1,029. All of it happens twice, once per scope,
+and it dominates both budgets: 24 of the 25 seconds of startup, and the arena
+grown to absorb its garbage is the 386 MB of anonymous RSS.
+
+The second pass is cheaper than the first — 7.0 s against 16.9 s — because both
+providers share one `sdkProvider` and `NewProvider` materialises lazy schemas by
+assigning into it (`terraformResource.Schema = terraformResource.SchemaFunc()`).
+The first pass pays for ~1,000 `SchemaFunc()` calls and mutates the shared
+resources; the second finds `Schema` already set. About 10 seconds of startup is
+therefore schema materialisation for resources the family will never reconcile.
 
 Note that `CLIReconciledExternalNameConfigs` is empty for AWS: no resource is
 reconciled through the Terraform CLI. For plugin-SDK resources
@@ -220,14 +240,17 @@ change in the `upbound/terraform-provider-aws` fork.
 
 ### 3. Stop building 1,029 resource configurations to use 104
 
-Heap rather than image, so smaller in absolute terms, but it also removes the
-peak-RSS spike and a chunk of startup latency.
+Now measured as the largest win after the binary itself: this work is **24 of
+the 25 seconds of startup**, and the arena it grows to absorb its own garbage is
+**386 MB of anonymous RSS** — the half a pod's working-set metric counts in full.
 
 * Filter `config.Provider.Resources` to the family. The mapping is already
   statically known in-repo — `config/groups.go` plus upjet's default
-  group derivation — so a per-family include list can be generated. Measured at
-  **-11.4 MiB** of live heap for the resource configs themselves, on top of
-  avoiding ~1,000 `SchemaFunc()` materialisations and traversals.
+  group derivation — so a per-family include list can be generated. Worth
+  **-11.4 MiB** of live heap for the resource configs themselves, but that
+  understates it: skipping 925 of 1,029 resources also skips their
+  `SchemaFunc()` materialisations and traversals, which is where the seconds and
+  the garbage both come from.
 * Skip the embedded JSON schema and registry metadata at runtime. This needs an
   upjet option — `NewProvider` unconditionally unmarshals both — but nothing
   downstream reads either one outside the code generation pipelines.
@@ -240,34 +263,46 @@ peak-RSS spike and a chunk of startup latency.
 `MetaResource` on every resource once the configurators have run, for
 non-generation providers. That is the scraped Terraform documentation —
 descriptions, argument docs and examples — which only `pkg/types`,
-`pkg/pipeline` and `pkg/examples` read. Measured at **-17.2 MiB** of live heap.
+`pkg/pipeline` and `pkg/examples` read.
+
+Verified end to end rather than simulated: with the change compiled in, live
+heap after step 6 is **51.5 MiB against 68.7 MiB before**, and the harness's
+"drop MetaResource" simulation now reclaims **+0.0 MiB** because there is
+nothing left to reclaim. Startup time is unchanged; the release itself takes
+10 ms.
 
 ## Reconciling this with the ~300 MB seen on a pod
 
 The numbers above are RSS. A pod's reported memory is not RSS: cadvisor computes
 `container_memory_working_set_bytes` as `memory.current - inactive_file` (cgroup
-v2; `total_inactive_file` on v1). Executable text and rodata are *clean,
-file-backed* pages. Once they age onto the inactive file LRU the working-set
-metric subtracts them, even though they are still mapped and still counted in
-RSS.
+v2; `total_inactive_file` on v1). That formula treats the two halves of this
+process very differently.
 
-That is exactly the memory this document is about. The split measured from
-`smaps_rollup` is 89.7% `Private_Clean` against 9.8% `Anonymous`, so almost all
-of it is subtractable in principle. For the API packages alone, 129,860 kB of
-the 148,220 kB resident is clean and only 16,728 kB is anonymous.
+* The **692 MB of executable** is clean, file-backed. Once those pages age onto
+  the inactive file LRU the metric subtracts them, even though they are still
+  mapped and still counted in RSS.
+* The **386 MB of anonymous arena** is not file-backed and is never subtracted.
+  A pod pays for all of it, all the time.
 
-So a family provider reporting ~300 MB of working set while carrying ~600 MiB of
-RSS is consistent, not contradictory: roughly 100 MiB of that is anonymous — the
-69 MiB live heap plus runtime and stacks — and the rest is whatever share of the
-executable is still on the active file LRU at the moment of scraping. It also
-means the cost is understated by the metric people watch. The pages are real:
-they compete for the node's page cache, they are re-faulted from disk after
-eviction, and they are why cold start is slow.
+So a family provider reporting ~300 MB of working set is most likely reporting
+the Go arena almost in full, with the executable's clean pages largely aged out.
+That matches the measurement closely: under `GOMEMLIMIT=300MiB` the anonymous
+figure is 288 MB.
+
+Two consequences follow, and they point at different work.
+
+* **For the metric people watch**, the arena is the target: build 104 resource
+  configurations instead of 1,029 so the garbage is never produced, and cap the
+  heap in the meantime.
+* **For node pressure and cold start**, the executable is the target. Those
+  pages are real — they compete for the node's page cache, they are re-faulted
+  from disk after eviction, and they are why a pod that has just been scheduled
+  is slow. The working-set metric simply does not show them.
 
 Note on completeness: the figures here come from probes that link the same
 package sets as `cmd/provider/<family>`, not from the shipped binary. Building
 `cmd/provider/ec2` exhausted this environment's disk allowance three times — the
-`$WORK` tree for its ~6,000 packages does not fit — so ~600 MiB is a measured
+`$WORK` tree for its ~6,000 packages does not fit — so these are a measured
 lower bound on the shipped binary rather than a reading of it. A family binary
 links everything the probes link *plus* every family's controllers, so it cannot
 be smaller.
@@ -276,9 +311,27 @@ be smaller.
 
 * **Safe-start and MRAP.** Both are already in place, and both address a
   different cost — API server memory per established CRD, and informer caches
-  per started controller. Neither touches the resident code.
+  per started controller. Neither touches resident code or the startup arena.
 * **Stripping the binary.** `-ldflags="-s -w"` removes ~730 MB of DWARF from
   the file, which halves image pull size, but DWARF is never resident so RSS is
   unchanged.
-* **`GOGC` / `GOMEMLIMIT` tuning.** Live heap is 69 MiB against ~1 GiB RSS.
-  There is very little heap to tune.
+
+## Correction
+
+An earlier revision of this document listed `GOGC` / `GOMEMLIMIT` tuning under
+"what does not help", on the grounds that 51 MiB of live heap leaves nothing to
+tune. That was wrong. Live heap is not the arena: the arena is sized by the
+peak, and startup's peak is driven by transient parsing garbage. Measured:
+
+| setting | `Anonymous` | startup path | live heap |
+| --- | ---: | ---: | ---: |
+| `GOGC=100` (default) | 386 MB | 25.0 s | 51.5 MiB |
+| `GOMEMLIMIT=300MiB` | 288 MB | 27.2 s | 51.5 MiB |
+| `GOGC=50` | 318 MB | 26.6 s | 51.5 MiB |
+| `GOGC=25` | 269 MB | 32.2 s | 51.5 MiB |
+
+`GOMEMLIMIT=300MiB` gives up ~100 MB of anonymous RSS for 2 seconds of startup,
+which is the best of these trade-offs and needs no code change at all. It is a
+mitigation rather than a fix — the garbage is still produced — but it is the one
+lever available today, and it acts on the half of RSS that a pod's working-set
+metric counts in full.
