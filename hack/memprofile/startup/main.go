@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"time"
 
 	"github.com/crossplane/upjet/v2/pkg/config"
 	"github.com/hashicorp/terraform-provider-aws/xpprovider"
@@ -30,9 +31,19 @@ import (
 // family is the API group the "keep one family" simulation retains.
 var family = "ec2"
 
-var lastLive float64
+var (
+	lastLive float64
+	mark     time.Time
+	cumWork  time.Duration
+)
+
+// begin starts timing a step. The elapsed time step reports is the work
+// itself, not the collections step forces around the reading.
+func begin() { mark = time.Now() }
 
 func step(name string) {
+	work := time.Since(mark)
+	cumWork += work
 	// Two collections so that anything the previous step made unreachable is
 	// really off the heap before we read it.
 	runtime.GC()
@@ -40,9 +51,10 @@ func step(name string) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	live := float64(m.HeapAlloc) / (1 << 20)
-	fmt.Printf("%-48s live=%8.1f MiB  delta=%+9.1f  RSS=%7.1f  peakRSS=%7.1f\n",
-		name, live, live-lastLive, meminfo.RSS(), meminfo.PeakRSS())
+	fmt.Printf("%-46s live=%7.1f MiB  delta=%+8.1f  RSS=%7.1f  took=%8s\n",
+		name, live, live-lastLive, meminfo.RSS(), work.Round(time.Millisecond))
 	lastLive = live
+	begin()
 }
 
 func main() {
@@ -50,6 +62,8 @@ func main() {
 		family = f
 	}
 	ctx := context.Background()
+	preMain := meminfo.SinceExec()
+	begin()
 	step("0. process start (binary linked, inits run)")
 
 	scheme := k8sruntime.NewScheme()
@@ -74,7 +88,9 @@ func main() {
 	must(err)
 	step("6. config.GetProviderNamespaced")
 
-	fmt.Printf("\n   TF SDK provider ResourcesMap entries : %d\n", len(sdkProvider.ResourcesMap))
+	fmt.Printf("\n   time from exec to main()             : %s\n", preMain.Round(time.Millisecond))
+	fmt.Printf("   time in the startup path             : %s\n", cumWork.Round(time.Millisecond))
+	fmt.Printf("   TF SDK provider ResourcesMap entries : %d\n", len(sdkProvider.ResourcesMap))
 	fmt.Printf("   cluster config.Provider resources    : %d\n", len(clusterProvider.Resources))
 	fmt.Printf("   namespaced config.Provider resources : %d\n", len(nsProvider.Resources))
 	fmt.Printf("   scheme known GVKs                    : %d\n", len(scheme.AllKnownTypes()))

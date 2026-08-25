@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // procStatusMiB returns the value of the given /proc/self/status field, in MiB.
@@ -66,4 +67,43 @@ func Smaps() string {
 // of the provider but has not done any work yet.
 func ReportLinkCost(stage string) {
 	fmt.Printf("%-30s RSS=%7.1f MiB\n", stage, RSS())
+}
+
+// SinceExec returns how long ago the process was exec'd, which includes the
+// runtime and package init work that happens before main. Returns 0 if it
+// cannot be determined.
+func SinceExec() time.Duration {
+	stat, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		return 0
+	}
+	// Field 22 is starttime, in clock ticks since boot. The comm field at
+	// index 1 can contain spaces, so index from the closing parenthesis.
+	i := strings.LastIndex(string(stat), ")")
+	if i < 0 {
+		return 0
+	}
+	f := strings.Fields(string(stat)[i+1:])
+	// f[0] is state, which is field 3, so starttime is at f[22-3].
+	if len(f) < 20 {
+		return 0
+	}
+	ticks, err := strconv.ParseFloat(f[19], 64)
+	if err != nil {
+		return 0
+	}
+	up, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	uf := strings.Fields(string(up))
+	if len(uf) == 0 {
+		return 0
+	}
+	uptime, err := strconv.ParseFloat(uf[0], 64)
+	if err != nil {
+		return 0
+	}
+	// USER_HZ is 100 on every Linux platform Go builds for.
+	return time.Duration((uptime - ticks/100) * float64(time.Second))
 }
