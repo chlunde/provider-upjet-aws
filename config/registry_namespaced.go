@@ -83,6 +83,9 @@ func GetProviderNamespaced(ctx context.Context, fwProvider fwprovider.Provider, 
 
 	pc.ConfigureResources()
 	registerTFSingletonListConversions(pc)
+	if !generationProvider {
+		dropCodegenOnlyMetadata(pc)
+	}
 	return pc, nil
 }
 

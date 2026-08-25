@@ -7,6 +7,7 @@ package config
 import (
 	_ "embed"
 
+	"github.com/crossplane/upjet/v2/pkg/config"
 	conversiontfjson "github.com/crossplane/upjet/v2/pkg/types/conversion/tfjson"
 	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -97,4 +98,18 @@ func TerraformPluginFrameworkResourceList() []string {
 		i++
 	}
 	return l
+}
+
+// dropCodegenOnlyMetadata releases the Terraform registry metadata (resource
+// descriptions, argument docs and examples scraped from the Terraform provider
+// documentation) that upjet attaches to every config.Resource. It is only read
+// by the code generation pipelines, so keeping it around costs the provider
+// runtime tens of MiB of live heap for the ~1000 configured resources without
+// ever being used. Must only be called for a non-generation provider, and only
+// after the reference injectors and the resource configurators have run, since
+// those do consume the metadata.
+func dropCodegenOnlyMetadata(pc *config.Provider) {
+	for _, r := range pc.Resources {
+		r.MetaResource = nil
+	}
 }
