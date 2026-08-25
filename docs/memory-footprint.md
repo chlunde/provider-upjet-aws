@@ -242,6 +242,36 @@ non-generation providers. That is the scraped Terraform documentation —
 descriptions, argument docs and examples — which only `pkg/types`,
 `pkg/pipeline` and `pkg/examples` read. Measured at **-17.2 MiB** of live heap.
 
+## Reconciling this with the ~300 MB seen on a pod
+
+The numbers above are RSS. A pod's reported memory is not RSS: cadvisor computes
+`container_memory_working_set_bytes` as `memory.current - inactive_file` (cgroup
+v2; `total_inactive_file` on v1). Executable text and rodata are *clean,
+file-backed* pages. Once they age onto the inactive file LRU the working-set
+metric subtracts them, even though they are still mapped and still counted in
+RSS.
+
+That is exactly the memory this document is about. The split measured from
+`smaps_rollup` is 89.7% `Private_Clean` against 9.8% `Anonymous`, so almost all
+of it is subtractable in principle. For the API packages alone, 129,860 kB of
+the 148,220 kB resident is clean and only 16,728 kB is anonymous.
+
+So a family provider reporting ~300 MB of working set while carrying ~600 MiB of
+RSS is consistent, not contradictory: roughly 100 MiB of that is anonymous — the
+69 MiB live heap plus runtime and stacks — and the rest is whatever share of the
+executable is still on the active file LRU at the moment of scraping. It also
+means the cost is understated by the metric people watch. The pages are real:
+they compete for the node's page cache, they are re-faulted from disk after
+eviction, and they are why cold start is slow.
+
+Note on completeness: the figures here come from probes that link the same
+package sets as `cmd/provider/<family>`, not from the shipped binary. Building
+`cmd/provider/ec2` exhausted this environment's disk allowance three times — the
+`$WORK` tree for its ~6,000 packages does not fit — so ~600 MiB is a measured
+lower bound on the shipped binary rather than a reading of it. A family binary
+links everything the probes link *plus* every family's controllers, so it cannot
+be smaller.
+
 ## What does not help
 
 * **Safe-start and MRAP.** Both are already in place, and both address a
