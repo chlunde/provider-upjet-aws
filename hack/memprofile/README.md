@@ -16,6 +16,11 @@ Two kinds of measurement:
   and attributes **live heap** and **RSS** to each step. It then simulates a few
   candidate optimisations and reports what each would reclaim.
 
+* `hack/memprofile/reconcile` measures the per-reconcile costs of the Connect
+  and Observe path — the schema rebuilds, the AWS client and framework provider
+  construction — and checks whether this provider's schema edits survive into
+  the schema the Terraform SDK actually uses. See `docs/reconcile-workflow.md`.
+
 * `hack/memprofile/linkcost/*` measure the **link cost** of a package set: each
   program links a different slice of the provider and reports its RSS before it
   does any work. The difference between them is memory the process pays purely
@@ -23,6 +28,7 @@ Two kinds of measurement:
 
 ```console
 go run ./hack/memprofile/startup
+go run ./hack/memprofile/reconcile
 go run ./hack/memprofile/linkcost/allapis      # every API group, both scopes
 go run ./hack/memprofile/linkcost/familyapis   # one family's API group only
 go run ./hack/memprofile/linkcost/tfaws        # terraform-provider-aws
