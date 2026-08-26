@@ -12,6 +12,11 @@ walking those two paths on `main`.
 
 Measured with `hack/memprofile/reconcile` against this tree.
 
+A companion document, [`reconcile-workflow-detail.md`](reconcile-workflow-detail.md),
+completes the finding-1 inventory, covers the async/update/delete/framework
+paths and the conversions, and adds a larger finding about schema objects
+shared between resources.
+
 ## The workflow
 
 Both paths funnel through the same two calls. `managed.Reconciler` calls
