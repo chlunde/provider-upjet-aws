@@ -104,6 +104,14 @@ func newCallerIdentityCacheEntry(o *sts.GetCallerIdentityOutput, accessedAt time
 	return e
 }
 
+// lastAccess returns the entry's access time. An entry that was constructed
+// without one reports the zero time, which makes it the first candidate for
+// eviction rather than a panic on the reconciliation hot path.
+func (e *callerIdentityCacheEntry) lastAccess() time.Time {
+	t, _ := e.accessedAt.Load().(time.Time)
+	return t
+}
+
 // GetCallerIdentity returns the identity of the caller.
 func (c *CallerIdentityCache) GetCallerIdentity(ctx context.Context, cfg aws.Config, creds aws.Credentials) (*sts.GetCallerIdentityOutput, error) {
 	key := fmt.Sprintf("%s:%s:%s",
@@ -123,7 +131,7 @@ func (c *CallerIdentityCache) GetCallerIdentity(ctx context.Context, cfg aws.Con
 		// refreshes may overwrite each other, which is fine because any of
 		// the stored values is recent enough for the LRU eviction to be
 		// meaningful.
-		if time.Since(o.accessedAt.Load().(time.Time)) > 10*time.Minute {
+		if time.Since(o.lastAccess()) > 10*time.Minute {
 			o.accessedAt.Store(time.Now())
 		}
 		return o.GetCallerIdentityOutput, nil
@@ -151,7 +159,7 @@ func (c *CallerIdentityCache) makeRoom() {
 		if dustiest == "" {
 			dustiest = key
 		}
-		if val.accessedAt.Load().(time.Time).Before(c.cache[dustiest].accessedAt.Load().(time.Time)) {
+		if val.lastAccess().Before(c.cache[dustiest].lastAccess()) {
 			dustiest = key
 		}
 	}
