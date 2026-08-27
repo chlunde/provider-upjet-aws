@@ -58,7 +58,7 @@ Deliberately excluded, with reasons:
 | [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
 | [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | not started |
 | [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | not started |
-| [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | not started |
+| [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | **ready, one caveat** — `fix/identity-cache-race-and-lock-scope` @ `efb86ceee` |
 | [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | **reviewed, ready** — `fix/single-global-rate-limiter` @ `2de61d751` |
 
 ## Progress
@@ -98,6 +98,29 @@ way the limiter was.
 Open for a human: CI must supply the compile check — the regression test parses
 the generated mains rather than compiling them, and each is its own `package
 main`. The throughput change needs a release note.
+
+### 12 — identity cache race and lock scope
+
+Ready, with one caveat a human must close. Three commits: the fix, and a review
+correction reading the access time through a `lastAccess()` comma-ok accessor so
+an entry built as a bare literal reports the zero time instead of panicking on
+the hot path.
+
+The lock-scope half turned out larger than the analysis described. The original
+`defer c.mu.Unlock()` held the cache-wide write lock not only across the
+`sts:GetCallerIdentity` call but across the trailing `newCredentials(...)`, which
+performs a `Retrieve()` — so a second potential network call ran under the same
+lock. Both are now outside it.
+
+**Caveat: the race itself is not confirmed against the production types.**
+`internal/clients` transitively imports terraform-provider-aws, so `-race`
+rebuilds every dependency; two attempts exhausted the disk before linking. The
+race was demonstrated in a dependency-free side module, but that scratch module
+was deleted during disk recovery and the result can no longer be audited. What
+*is* confirmed here: `go build` and `go test` (without `-race`) pass on the
+package, and the regression test is well formed — 500 rounds of 32 goroutines
+released together against a deliberately stale entry, so every goroutine takes
+the refresh branch. CI running `-race` is what proves this change.
 
 ## Suggested order
 
