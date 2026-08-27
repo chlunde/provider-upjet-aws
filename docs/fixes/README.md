@@ -60,6 +60,7 @@ Deliberately excluded, with reasons:
 | [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | **ready, re-priced** — `fix/scope-secret-informer` @ `18fa5d097`, see audit-cost note |
 | [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | **ready, one caveat** — `fix/identity-cache-race-and-lock-scope` @ `efb86ceee` |
 | [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | **reviewed, ready** — `fix/single-global-rate-limiter` @ `2de61d751` |
+| 14 | Suppress the no-op status update on every reconcile | waste / cost | high (cost) | small | crossplane-runtime | **implemented, verified** — `fix/suppress-noop-status-update` @ `35d1fdc` |
 
 ## Progress
 
@@ -237,6 +238,42 @@ value-per-line changes in this analysis.
 Neither figure has been measured against a real bill — they are request rates
 measured here multiplied by public per-event assumptions, and the exact cost
 depends on the cluster's audit policy level for reads versus writes.
+
+### 14 — no-op status update (crossplane-runtime)
+
+Added to this list *after* the original triage, because the audit-cost lens
+re-prioritised it. [`architecture-wins.md`](../architecture-wins.md) §5 correctly
+established that the API server discards the identical update before etcd — no
+storage write, no watch event. What remains is the request: still sent,
+authenticated, authorised, admitted and audited, once per managed resource per
+poll. Roughly 720,000 audited no-op writes per day at 5,000 MRs on the default
+interval.
+
+Implemented on `chlunde/crossplane-runtime`, branch
+`fix/suppress-noop-status-update`, commit `35d1fdc`, based on upstream `4e7ed23`.
+
+The design errs toward writing. A deep copy is taken immediately after the
+successful `Get`, and the comparison happens *inside* `updateStatus` **after**
+`SetLastHandledReconcileAt` is applied — so a new reconcile-request token always
+writes. The whole object is compared rather than just `.status`, meaning any
+mutation not provably a no-op falls through to a write: comparison mistakes can
+only produce redundant writes, never suppressed ones.
+
+All 26 `updateStatus()` call sites were audited. The paused path
+(`reconciler.go:989`) bypasses `updateStatus` by design and was left alone.
+
+Verified here independently rather than on report: the diff is **238 insertions
+and zero deletions**, so no existing assertion was weakened to make anything
+pass. Forcing always-suppress fails three tests —
+`ChangedConditionIssuesStatusUpdate`, `NewErrorConditionIssuesStatusUpdate` and
+`NewReconcileRequestTokenIssuesStatusUpdate` — with `want status update, got
+none`, which is exactly the stale-status regression this change must not cause.
+Full `go test ./...` green.
+
+One judgement for a reviewer: `equality.Semantic` treats Quantity `1` and
+`1000m` as equal, so a status field changing only in formatting would be
+suppressed. Semantically identical, but `reflect.DeepEqual` is the stricter
+alternative if maintainers prefer it.
 
 ## Suggested order
 
