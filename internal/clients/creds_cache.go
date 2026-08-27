@@ -20,13 +20,30 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/upbound/provider-aws/v2/apis/namespaced/v1beta1"
 )
 
 const (
-	errGetAccountID = "cannot retrieve the AWS account ID"
+	errGetAccountID    = "cannot retrieve the AWS account ID"
+	errRetrieveCreds   = "cannot retrieve the AWS credentials"
+	errResolveAWSConf  = "cannot resolve the AWS config"
+	errTokenFileHash   = "cannot calculate the hash for the credentials file"
+	errCacheKeyCompute = "cannot compute the credentials cache key"
 )
+
+// awsConfigCacheTTL is how long a resolved AWS config -- and thus the
+// credential Secret contents behind it -- is served before it is resolved
+// again from scratch. It is the upper bound on how long a rotated credential
+// Secret can go unnoticed, because rotating a Secret does not change the
+// ProviderConfig's generation and so cannot be observed by the cache key.
+//
+// It is deliberately below the minimum STS session duration of 15 minutes
+// (stscreds.DefaultDuration), so that a cached assume-role session provider
+// is replaced well before the SDK would have to refresh it in the background
+// from a reconcile context that may already be canceled.
+const awsConfigCacheTTL = 5 * time.Minute
 
 // AWSCredentialsProviderCacheOption lets you configure
 // a *GlobalAWSCredentialsProviderCache.
@@ -70,25 +87,33 @@ func NewAWSCredentialsProviderCache(opts ...AWSCredentialsProviderCacheOption) *
 	return c
 }
 
-// AWSCredentialsProviderCache holds aws.CredentialsProvider objects in memory
-// so that we don't need to make API calls to AWS in every reconciliation of
+// AWSCredentialsProviderCache caches resolved AWS configs per ProviderConfig
+// and region, so that credential resolution happens once per ProviderConfig
+// instead of once per reconcile of every managed resource using it. On a
+// cache hit no Kubernetes API request and no STS call is made: the
+// credential Secret is not re-read and the cached config's own
+// aws.CredentialsCache serves the session credentials it already holds.
 //
-//	every resource. It has a maximum size that when it's reached, the entry
-//	that has the oldest access time will be removed from the cache,
-//	i.e. FIFO on last access time.
-//
-// Note that there is no need to invalidate the values in the cache because
-// they never change, so we don't need concurrency-safety to prevent access
-// to an invalidated entry.
+// It has a maximum size that when it's reached, the entry that has the
+// oldest access time will be removed from the cache, i.e. FIFO on last
+// access time. Entries expire after awsConfigCacheTTL, except for the IRSA
+// source; see expired.
 type AWSCredentialsProviderCache struct {
-	// cache holds the AWS Config with a unique cache key per
-	// provider configuration. Key content includes the ProviderConfig's UUID
-	// and Generation and additional fields depending on the auth method
-	// (currently only IRSA temporary credential caching is supported).
+	// cache holds the resolved AWS config and account ID with a unique
+	// cache key per provider configuration. Key content includes the
+	// ProviderConfig's UUID and Generation, the region, the credential
+	// source and, for token file based sources, the token file path and a
+	// hash of its content.
 	cache map[string]*awsCredentialsProviderCacheEntry
 
 	// maxSize is the maximum number of elements this cache can ever have.
 	maxSize int
+
+	// resolveGroup deduplicates concurrent resolutions of the same cache
+	// key, so that a burst of reconciles sharing one ProviderConfig
+	// resolves it once. Resolution runs outside mu: the cache-wide lock is
+	// never held across a network call.
+	resolveGroup singleflight.Group
 
 	// mu is used to make sure the cache map is concurrency-safe.
 	mu *sync.RWMutex
@@ -97,139 +122,213 @@ type AWSCredentialsProviderCache struct {
 	logger logging.Logger
 }
 
+// awsCredentialsProviderCacheEntry is a resolved AWS config together with
+// the AWS account ID for its credentials. Entries are fully constructed
+// before they are published to the cache map and all fields except
+// accessedAt are read-only afterwards.
 type awsCredentialsProviderCacheEntry struct {
-	awsCredCache *aws.CredentialsCache
-	accessedAt   atomic.Value
-	accountID    atomic.Value
+	cfg        *aws.Config
+	accountID  string
+	resolvedAt time.Time
+	// accessedAt stores a time.Time and is read and refreshed on the hot
+	// path without holding any lock, so it must be accessed atomically.
+	accessedAt atomic.Value
 }
 
-// AccountIDFn is a function for retrieving the account ID.
-type AccountIDFn func(ctx context.Context) (string, error)
-
-func accountIDFromCacheEntry(e *awsCredentialsProviderCacheEntry) AccountIDFn {
-	return func(context.Context) (string, error) {
-		// return the cached account ID
-		return e.accountID.Load().(string), nil
-	}
+// lastAccess returns the entry's access time. An entry constructed without
+// one reports the zero time, which makes it the first candidate for
+// eviction rather than a panic on the reconciliation hot path.
+func (e *awsCredentialsProviderCacheEntry) lastAccess() time.Time {
+	t, _ := e.accessedAt.Load().(time.Time)
+	return t
 }
+
+// AWSConfigResolverFn resolves an *aws.Config for a ProviderConfig. It is
+// only invoked on a cache miss and it is the expensive work this cache
+// exists to avoid: it may read the credential Secret from the API server
+// and it constructs the STS assume role providers.
+type AWSConfigResolverFn func(ctx context.Context) (*aws.Config, error)
+
+// AccountIDFn retrieves the AWS account ID for a resolved AWS config and
+// its retrieved credentials. It is only invoked on a cache miss.
+type AccountIDFn func(ctx context.Context, cfg *aws.Config, creds aws.Credentials) (string, error)
 
 // Credentials holds the aws.Credentials and the associated AWS account ID for
-// these credentials. It's possible that the account ID is not resolved and
-// only the aws.Credentials are available in a successful result.
+// these credentials.
 type Credentials struct {
 	creds     aws.Credentials
 	accountID string
 }
 
-// newCredentials returns the Credentials whose credentials are retrieved
-// using the given aws.CredentialsProvider and whose account ID is set using
-// the given AccountIDFn.
-func newCredentials(ctx context.Context, credsProvider aws.CredentialsProvider, accountIDFn AccountIDFn) (Credentials, error) {
-	var result Credentials
-	// try to retrieve the credentials if a retriever has been supplied
-	if credsProvider != nil {
-		var err error
-		if result.creds, err = credsProvider.Retrieve(ctx); err != nil {
-			return Credentials{}, errors.Wrap(err, "cannot retrieve the AWS credentials")
-		}
+// RetrieveConfig returns the resolved AWS config and credentials for the
+// given ProviderConfig and region, from the cache when possible. On a cache
+// miss -- or an expired or failing entry -- resolverFn and accountIDFn are
+// invoked outside the cache-wide lock and the result is cached. On a cache
+// hit neither is invoked and the credentials come from the cached config's
+// own credential provider, an aws.CredentialsCache for the STS-backed
+// sources, which refreshes them based on expiry.
+//
+// The returned *aws.Config is a shallow copy of the cached one, so that a
+// caller cannot mutate state shared with concurrent callers; the credential
+// provider inside it is shared on purpose.
+func (c *AWSCredentialsProviderCache) RetrieveConfig(ctx context.Context, pc *v1beta1.ClusterProviderConfig, region string, resolverFn AWSConfigResolverFn, accountIDFn AccountIDFn) (*aws.Config, Credentials, error) {
+	cacheKey, err := c.cacheKey(pc, region)
+	if err != nil {
+		return nil, Credentials{}, errors.Wrap(err, errCacheKeyCompute)
 	}
-	// try to get the account ID
-	if accountIDFn != nil {
-		var err error
-		if result.accountID, err = accountIDFn(ctx); err != nil {
-			return Credentials{}, errors.Wrap(err, errGetAccountID)
+
+	c.mu.RLock()
+	entry, ok := c.cache[cacheKey]
+	c.mu.RUnlock()
+	if ok && !expired(pc, entry) {
+		creds, err := c.entryCredentials(ctx, entry)
+		if err == nil {
+			c.logger.Debug("Cache hit", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String())
+			cfg := *entry.cfg
+			return &cfg, creds, nil
 		}
+		// The cached credentials no longer work, e.g. the Secret was
+		// rotated and the old keys were deactivated before the TTL
+		// expired. Invalidate the entry and resolve from scratch below.
+		c.logger.Debug("Cached credentials failed to retrieve, invalidating", "cacheKey", cacheKey, "error", err)
+		c.invalidate(cacheKey, entry)
 	}
-	return result, nil
+
+	// Cache miss, expired or invalidated entry. Resolve outside the
+	// cache-wide lock. The singleflight group makes concurrent callers for
+	// the same key share one resolution instead of each reading the Secret
+	// and calling STS.
+	v, err, _ := c.resolveGroup.Do(cacheKey, func() (any, error) {
+		// A concurrent caller may have just resolved and cached this key.
+		c.mu.RLock()
+		entry, ok := c.cache[cacheKey]
+		c.mu.RUnlock()
+		if ok && !expired(pc, entry) {
+			return entry, nil
+		}
+		c.logger.Debug("Cache miss", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String(), "cacheSize", len(c.cache))
+		cfg, err := resolverFn(ctx)
+		if err != nil {
+			return nil, errors.Wrap(err, errResolveAWSConf)
+		}
+		// Retrieve the credentials once so that a broken configuration
+		// fails here instead of being cached, and so that accountIDFn can
+		// use them.
+		var creds aws.Credentials
+		if cfg.Credentials != nil {
+			if creds, err = cfg.Credentials.Retrieve(ctx); err != nil {
+				return nil, errors.Wrap(err, errRetrieveCreds)
+			}
+		}
+		accountID, err := accountIDFn(ctx, cfg, creds)
+		if err != nil {
+			return nil, errors.Wrap(err, errGetAccountID)
+		}
+		entry = &awsCredentialsProviderCacheEntry{
+			cfg:        cfg,
+			accountID:  accountID,
+			resolvedAt: time.Now(),
+		}
+		entry.accessedAt.Store(time.Now())
+		c.store(cacheKey, entry)
+		return entry, nil
+	})
+	if err != nil {
+		return nil, Credentials{}, err
+	}
+	entry = v.(*awsCredentialsProviderCacheEntry) //nolint:forcetypeassert // only entries are stored in the group
+	creds, err := c.entryCredentials(ctx, entry)
+	if err != nil {
+		c.invalidate(cacheKey, entry)
+		return nil, Credentials{}, err
+	}
+	cfg := *entry.cfg
+	return &cfg, creds, nil
 }
 
-// RetrieveCredentials returns a Credentials either from the credential cache.
-// If the authentication scheme is IRSA and the supplied
-// aws.CredentialsProvider implementation is an aws.CredentialsCache, then the
-// retrieved credentials and the account ID are cached for future requests.
-// Otherwise, this function returns the AWS credentials by calling
-// the downstream aws.CredentialsProvider.Retrieve, and for now, does *not*
-// call the given AccountIDFn because in that case, a separate identity cache
-// should be used to retrieve the caller identity.
-func (c *AWSCredentialsProviderCache) RetrieveCredentials(ctx context.Context, pc *v1beta1.ClusterProviderConfig, region string, credsProvider aws.CredentialsProvider, accountIDFn AccountIDFn) (Credentials, error) {
-	// Only IRSA credentials are cached currently and
-	// only aws.CredentialsCache is supported as the underlying
-	// credential provider.
-	awsCredsCache, ok := credsProvider.(*aws.CredentialsCache)
-	if !ok {
-		c.logger.Debug("Configured aws.CredentialsProvider is not an aws.CredentialsCache, cannot utilize the provider credential cache...")
-	}
-	if pc.Spec.Credentials.Source != authKeyIRSA || !ok {
-		// if this cache manager is not going to be employed, do not call
-		// the given accountIDFn because there's a separate identity cache
-		// implementation.
-		// TODO: Replace the identity cache with this cache.
-		return newCredentials(ctx, credsProvider, nil)
-	}
-	// cache key calculation tries to capture any parameter that
-	// could cause changes in the resulting AWS credentials,
-	// to ensure unique keys.
-	//
-	// Parameters that are directly available in the provider config will
-	// generate unique cache keys through UUID and Generation of
-	// the ProviderConfig's k8s object, as they change when the provider
-	// config is modified.
-	//
-	// Any other external parameter that have an effect on the resulting
-	// credentials and does not appear in the ProviderConfig directly
-	// (i.e. the same provider config content produces a different config),
-	// should be included in the cache key.
-	cacheKeyParams := []string{ // nolint:prealloc
+// cacheKey computes the cache key for the given ProviderConfig and region.
+// Everything about the ProviderConfig itself -- credential source, secret
+// references, assume role chain, endpoint config -- is covered by its UID
+// and Generation, which change whenever it is replaced or modified. Inputs
+// that change the resolved config without touching the ProviderConfig have
+// to be included separately: for the token file based sources that is the
+// token file path, a hash of its content and the role ARN from the AWS
+// environment variables. The contents of a credential Secret are
+// deliberately not part of the key -- reading them per reconcile is exactly
+// what this cache avoids -- which is why non-IRSA entries carry a TTL.
+func (c *AWSCredentialsProviderCache) cacheKey(pc *v1beta1.ClusterProviderConfig, region string) (string, error) {
+	cacheKeyParams := []string{
 		string(pc.UID),
 		strconv.FormatInt(pc.Generation, 10),
 		region,
 		string(pc.Spec.Credentials.Source),
 	}
-	tokenHash, err := hashTokenFile(os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE"))
-	if err != nil {
-		return Credentials{}, errors.Wrap(err, "cannot calculate the hash for the credentials file")
-	}
-	cacheKeyParams = append(cacheKeyParams, tokenHash, os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE"), os.Getenv("AWS_ROLE_ARN"))
-	cacheKey := strings.Join(cacheKeyParams, ":")
-	c.logger.Debug("Checking cache entry", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String())
-	c.mu.RLock()
-	cacheEntry, ok := c.cache[cacheKey]
-	c.mu.RUnlock()
-
-	// TODO: consider implementing a TTL even though the cached entry is valid
-	// cache hit
-	if ok {
-		c.logger.Debug("Cache hit", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String())
-		// since this is a hot-path in the execution, do not always update
-		// the last access times, it is fine to evict the LRU entry on a less
-		// granular precision.
-		if time.Since(cacheEntry.accessedAt.Load().(time.Time)) > 10*time.Minute {
-			cacheEntry.accessedAt.Store(time.Now())
+	tokenFile := os.Getenv(envWebIdentityTokenFile)
+	// IRSA requires the projected token file, so for IRSA an empty path is
+	// an error, as before. For the other sources these environment
+	// variables are optional and only included when present.
+	if pc.Spec.Credentials.Source == authKeyIRSA || tokenFile != "" {
+		tokenHash, err := hashTokenFile(tokenFile)
+		if err != nil {
+			return "", errors.Wrap(err, errTokenFileHash)
 		}
-		return newCredentials(ctx, cacheEntry.awsCredCache, accountIDFromCacheEntry(cacheEntry))
+		cacheKeyParams = append(cacheKeyParams, tokenHash, tokenFile, os.Getenv(envWebIdentityRoleARN))
 	}
+	return strings.Join(cacheKeyParams, ":"), nil
+}
 
+// expired reports whether the given cache entry is past awsConfigCacheTTL.
+// IRSA entries never expire: their only external input, the projected token
+// file, is part of the cache key, so a token rotation shows up as a new key
+// instead. This matches the pre-existing IRSA caching behavior.
+func expired(pc *v1beta1.ClusterProviderConfig, entry *awsCredentialsProviderCacheEntry) bool {
+	if pc.Spec.Credentials.Source == authKeyIRSA {
+		return false
+	}
+	return time.Since(entry.resolvedAt) > awsConfigCacheTTL
+}
+
+// entryCredentials retrieves the credentials of a cached entry and refreshes
+// its LRU access time. For the STS-backed sources entry.cfg.Credentials is
+// an aws.CredentialsCache, so this is a local operation unless the session
+// credentials approach expiry.
+func (c *AWSCredentialsProviderCache) entryCredentials(ctx context.Context, entry *awsCredentialsProviderCacheEntry) (Credentials, error) {
+	var creds aws.Credentials
+	if entry.cfg.Credentials != nil {
+		var err error
+		if creds, err = entry.cfg.Credentials.Retrieve(ctx); err != nil {
+			return Credentials{}, errors.Wrap(err, errRetrieveCreds)
+		}
+	}
+	// since this is a hot-path in the execution, do not always update
+	// the last access times, it is fine to evict the LRU entry on a less
+	// granular precision. accessedAt is atomic, so concurrent refreshes
+	// simply overwrite each other.
+	if time.Since(entry.lastAccess()) > 10*time.Minute {
+		entry.accessedAt.Store(time.Now())
+	}
+	return Credentials{creds: creds, accountID: entry.accountID}, nil
+}
+
+// store publishes a fully constructed entry, evicting the least recently
+// used entry if the cache is full.
+func (c *AWSCredentialsProviderCache) store(key string, entry *awsCredentialsProviderCacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// we need to recheck the cache because it might have already been
-	// populated.
-	cacheEntry, ok = c.cache[cacheKey]
-	if !ok {
-		// cache miss
-		c.logger.Debug("Cache miss", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String(), "cacheSize", len(c.cache))
+	if _, ok := c.cache[key]; !ok {
 		c.makeRoom()
-		cacheEntry = &awsCredentialsProviderCacheEntry{
-			awsCredCache: awsCredsCache,
-		}
-		id, err := accountIDFn(ctx)
-		if err != nil {
-			return Credentials{}, errors.Wrap(err, errGetAccountID)
-		}
-		cacheEntry.accountID.Store(id)
-		cacheEntry.accessedAt.Store(time.Now())
-		c.cache[cacheKey] = cacheEntry
 	}
-	return newCredentials(ctx, cacheEntry.awsCredCache, accountIDFromCacheEntry(cacheEntry))
+	c.cache[key] = entry
+}
+
+// invalidate removes the given entry from the cache, unless the entry stored
+// under the key has already been replaced by a newer one.
+func (c *AWSCredentialsProviderCache) invalidate(key string, entry *awsCredentialsProviderCacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cache[key] == entry {
+		delete(c.cache, key)
+	}
 }
 
 // makeRoom ensures that there is at most maxSize-1 elements in the cache map
@@ -246,7 +345,7 @@ func (c *AWSCredentialsProviderCache) makeRoom() {
 			dustiest = key
 			continue
 		}
-		if val.accessedAt.Load().(time.Time).Before(c.cache[dustiest].accessedAt.Load().(time.Time)) {
+		if val.lastAccess().Before(c.cache[dustiest].lastAccess()) {
 			dustiest = key
 		}
 	}

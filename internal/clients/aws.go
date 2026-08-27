@@ -10,7 +10,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
 	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/middleware"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
@@ -20,7 +19,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-provider-aws/xpprovider"
 	"github.com/pkg/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	namespacedv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/v1beta1"
@@ -99,43 +97,52 @@ func SelectTerraformSetup(config *SetupConfig) terraform.SetupFn { // nolint:goc
 			return terraform.Setup{}, err
 		}
 
+		// The resolved AWS config depends only on the ProviderConfig and the
+		// region, so both make up the cache key below. For global API groups
+		// the managed resource has no region of its own; an appropriate
+		// partition-specific one is substituted, because the TF AWS provider
+		// requires a non-empty region and so does the sts:GetCallerIdentity
+		// used to resolve the account ID.
+		region, err := getRegion(mg)
+		if err != nil {
+			return terraform.Setup{}, errors.Wrap(err, "cannot get region")
+		}
+		if region == "" {
+			gvk := mg.GetObjectKind().GroupVersionKind()
+			region = getGlobalRegion(gvk.Group, gvk.Kind, pc)
+		}
+
 		ps := terraform.Setup{}
-		awsCfg, err := getAWSConfigWithDefaultRegion(ctx, c, mg, pc)
+		// The credential resolution below -- reading the credential Secret,
+		// building the STS assume role providers and retrieving the AWS
+		// account ID -- is cached per ProviderConfig and region, so on a
+		// cache hit neither of the two functions passed here is invoked: no
+		// Kubernetes API request and no STS call is made.
+		awsCfg, credCache, err := credsCache.RetrieveConfig(ctx, pc, region,
+			func(ctx context.Context) (*aws.Config, error) {
+				cfg, err := GetAWSConfigWithoutTracking(ctx, c, mg, pc)
+				if err != nil {
+					return nil, err
+				}
+				if cfg.Region == "" {
+					cfg.Region = region
+				}
+				return cfg, nil
+			},
+			func(ctx context.Context, cfg *aws.Config, creds aws.Credentials) (string, error) {
+				if pc.Spec.SkipCredsValidation {
+					// then we do not try to resolve the account ID and
+					// instead, return a constant value as before.
+					return localstackAccountID, nil
+				}
+				return getAccountId(ctx, cfg, creds)
+			})
 		if err != nil {
 			return terraform.Setup{}, errors.Wrap(err, "cannot get aws config")
 		} else if awsCfg == nil {
-			return terraform.Setup{}, errors.Wrap(err, "obtained aws config cannot be nil")
+			return terraform.Setup{}, errors.New("obtained aws config cannot be nil")
 		}
 
-		// only IRSA auth credentials are currently cached, other auth methods
-		// will skip the cache and call the downstream
-		// CredentialsProvider.Retrieve().
-		credCache, err := credsCache.RetrieveCredentials(ctx, pc, awsCfg.Region, awsCfg.Credentials, func(ctx context.Context) (string, error) {
-			if pc.Spec.SkipCredsValidation {
-				// then we do not try to resolve the account ID and instead,
-				// return a constant value as before.
-				return localstackAccountID, nil
-			}
-			o, err := sts.NewFromConfig(*awsCfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
-			if err != nil {
-				return "", errors.Wrap(err, errGetCallerIdentityFailed)
-			}
-			return *o.Account, nil
-		})
-		if err != nil {
-			return terraform.Setup{}, errors.Wrap(err, "cache manager failure")
-		}
-
-		// if we are to retrieve the AWS account ID and if we have not already
-		// retrieved it via the credential cache, then we will utilize the
-		// identity cache.
-		// TODO: Replace the identity cache with the credential cache.
-		if !pc.Spec.SkipCredsValidation && credCache.accountID == "" {
-			credCache.accountID, err = getAccountId(ctx, awsCfg, credCache.creds)
-			if err != nil {
-				return terraform.Setup{}, errors.Wrap(err, "cannot get account id")
-			}
-		}
 		// just in case the localstack implementation relies on this...
 		if credCache.accountID == "" {
 			credCache.accountID = localstackAccountID
@@ -199,27 +206,6 @@ func getAccountId(ctx context.Context, cfg *aws.Config, creds aws.Credentials) (
 		return "", errors.Wrap(err, "cannot get the caller identity")
 	}
 	return *identity.Account, nil
-}
-
-// getAWSConfigWithDefaultRegion is a utility function that wraps the
-// GetAWSConfigWithoutTracking and fills empty region in the returned config for
-// global API groups with appropriate partition-specific regions. Although
-// this does not have an effect on the resource, as global group resources
-// have no concept of region, this is done to conform with the TF AWS config
-// which requires non-empty region
-func getAWSConfigWithDefaultRegion(ctx context.Context, c client.Client, obj runtime.Object, pc *namespacedv1beta1.ClusterProviderConfig) (*aws.Config, error) {
-	cfg, err := GetAWSConfigWithoutTracking(ctx, c, obj, pc)
-	if err != nil {
-		return nil, err
-	}
-	// For global API groups, set an appropriate default region when none is specified
-	if cfg.Region == "" {
-		gvk := obj.GetObjectKind().GroupVersionKind()
-		if region := getGlobalRegion(gvk.Group, gvk.Kind, pc); region != "" {
-			cfg.Region = region
-		}
-	}
-	return cfg, nil
 }
 
 // getGlobalRegion returns the appropriate region for global resources and API groups
