@@ -53,7 +53,7 @@ Deliberately excluded, with reasons:
 | [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | **implemented, narrowed** — `fix-error-on-missing-secret-key` @ `32e9967` |
 | [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | not started |
 | [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | not started |
-| [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | high (latent) | medium | upjet | not started |
+| [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | medium (latent) | small | upjet | **implemented, verified** — `fix-fieldpath-segmentwise-camel-snake` @ `046b8f2` |
 | [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | not started |
 | [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
 | [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | not started |
@@ -322,6 +322,38 @@ adjacent documented decision.
 The narrowed patch is also the more merge-likely one: erroring on a key that
 isn't there is unarguable, while reversing a documented design choice invites a
 debate that would sink the whole PR.
+
+### 07 — field-path camel→snake (upjet)
+
+Implemented and verified. `fix-fieldpath-segmentwise-camel-snake` @ `046b8f2`.
+A `convertFieldPathToSnake` helper parses with `fieldpath.Parse`, converts each
+`SegmentField`, and rejoins — so separators and indices survive. Four call sites
+use it.
+
+Two corrections to `07-fieldpath-camel-snake.md`, both from actually reproducing
+the bug rather than trusting the write-up:
+
+* The digit example was understated. `ipv6_addresses` becomes
+  `ipv_6___addresses` — triple underscore, not the `ipv_6_addresses` the doc
+  claimed. (`ipv_6_addresses` is what the camel input `ipv6Addresses` produces.)
+* **The digit case is a different bug and is not fixed here.**
+  `name.NewFromCamel("ipv6Addresses").Snake` returns `ipv_6_addresses`, not
+  `ipv6_addresses` — a lossy acronym round-trip inside `pkg/types/name` that
+  this change deliberately leaves alone. What this fixes is separator and index
+  handling; the doc conflated the two.
+
+Severity lowered from high to medium. The transform is provably wrong, but the
+agent could not establish that any provider currently registers a nested or
+digit-bearing path through this path, and top-level digit-free names — likely
+the common case today — were never affected. The writer side does store expanded
+**indexed** camelCase paths as annotation keys, so the plumbing points straight
+at it, but that is a hazard rather than a demonstrated failure. The PR says so
+plainly rather than inflating it.
+
+Verified here: reverting the helper to whole-path conversion fails six subtests
+with diffs like `-"foo_bar[0].baz_qux" +"foo_bar_[_0_]._baz_qux"`, and the
+end-to-end merge produces `{"foo_bar_": {"_0_": {"_baz_qux": ...}}}`. Full upjet
+suite green. No existing tests covered these functions, so none were changed.
 
 ## Suggested order
 
