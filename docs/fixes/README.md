@@ -47,7 +47,7 @@ Deliberately excluded, with reasons:
 
 | # | fix | category | severity | size | lives in | status |
 | - | --- | --- | --- | --- | --- | --- |
-| [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | in progress — `fix/movetostatus-copy-before-mutate` |
+| [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | **implemented, verified** — `chlunde/upjet` `fix-movetostatus-copy-before-mutate` @ `9124f35` |
 | [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet (or here) | not started |
 | [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | not started |
 | [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | not started |
@@ -57,7 +57,7 @@ Deliberately excluded, with reasons:
 | [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | not started |
 | [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
 | [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | not started |
-| [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | **reviewed, ready** — `fix/scope-secret-informer` @ `18fa5d097` |
+| [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | **ready, re-priced** — `fix/scope-secret-informer` @ `18fa5d097`, see audit-cost note |
 | [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | **ready, one caveat** — `fix/identity-cache-race-and-lock-scope` @ `efb86ceee` |
 | [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | **reviewed, ready** — `fix/single-global-rate-limiter` @ `2de61d751` |
 
@@ -161,6 +161,82 @@ rejected: it still requires a selector to get any hit at all, it introduces
 stale reads on a write path (`APIPatchingApplicator.Apply` reads before
 patching), it wins no RBAC narrowing, and it means hand-maintaining a
 `client.Client` across 178 binaries to avoid single-digit GET/s.
+
+### 01 — MoveToStatus shared-schema contamination (upjet)
+
+Implemented and independently verified. Branch `fix-movetostatus-copy-before-mutate`
+on `chlunde/upjet`, commit `9124f35`, based on current upstream `dbfccb4`.
+(The branch name uses dashes because a pre-existing remote branch named `fix`
+blocks the whole `fix/*` ref namespace on that fork.)
+
+`copySchemaAtPath` walks the fieldpath copying every node it traverses — the
+`*schema.Schema`, its `Elem` `*schema.Resource`, and a fresh `Schema` map — and
+re-attaches the copies, so the path is exclusively owned before any flag is set.
+The recursion then copies each nested subtree at every level it mutates. Copies
+are shallow struct copies plus fresh maps; validators and diff funcs stay
+shared, and untouched siblings keep their original pointers. The
+`return` → `continue` bug is fixed in the same commit.
+
+I re-ran the mutation test myself rather than take it on report. Applying the
+leaf-only-copy mutant — the failure mode most likely to look correct while still
+contaminating — produces:
+
+```
+rule.Elem still points at the shared nested resource; it must be copied before mutation
+shared leaf schema mutated in place: got {Optional: false, Computed: true}, want {Optional: true, Computed: false}
+shared nested schema field "tags" mutated in place: ...
+```
+
+That last line is the downstream symptom exactly. `go test ./pkg/config/...`,
+`go build ./...`, `go vet`, `gofmt` all clean; upjet has no terraform-provider-aws
+dependency, so unlike the provider fixes this one is genuinely tested rather than
+parser-verified.
+
+Left deliberately out of scope: `MarkAsRequired` and `ManipulateEveryField` in
+the same file mutate shared schemas the same way.
+
+## Kubernetes API calls are billed, not just capacity
+
+Every request to the API server is an audit event. On EKS with control-plane
+audit logging enabled, those events go to CloudWatch Logs and are billed on
+ingest — so **a request being cheap for etcd does not make it free**, and a
+write the API server discards as a no-op is still fully audited.
+
+This re-prices two conclusions recorded elsewhere in this analysis.
+
+**Fix 11's ruling was made against the wrong metric.** The review judged the
+added Secret reads acceptable by comparing 1.7–8.3 GET/s against etcd's ~10k
+reads/s. Under an audit-cost lens the relevant figure is events per day:
+
+| MRs on `source: Secret` | added GETs | audit events/day |
+| ---: | ---: | ---: |
+| 1,000 | 1.7/s | ~145,000 |
+| 5,000 | 8.3/s | ~717,000 |
+
+At roughly 1–2 KB per read event that is order 0.2–1.5 GB/day of extra ingest
+per cluster, aggregated across family pods. The flip is still the right call —
+it removes an unbounded per-pod memory cost and a full cluster-wide Secret LIST
+— but it is **not free**, and the follow-up the reviewer filed as optional now
+matters: a bounded TTL cache in `internal/clients`, keyed on the ProviderConfig
+secretRef, makes the flip cost-neutral. Treat that as part of the change rather
+than a someday item.
+
+**The no-op status PUT is worth more than recorded.**
+[`architecture-wins.md`](../architecture-wins.md) §5 correctly killed the *etcd*
+half of that lead: the API server byte-compares and discards identical updates
+before they reach etcd. But the PUT is still sent, still authenticated, still
+authorised and **still audited**, once per managed resource per poll. Write
+events are logged at a higher level than reads under typical policies and carry
+the object, so they are the larger line item of the two. At 5,000 MRs that is
+another ~717,000 audited writes per day that change nothing.
+
+Suppressing it client-side is small and lives in crossplane-runtime. Under a
+capacity lens it was marginal; under a cost lens it is one of the better
+value-per-line changes in this analysis.
+
+Neither figure has been measured against a real bill — they are request rates
+measured here multiplied by public per-event assumptions, and the exact cost
+depends on the cluster's audit policy level for reads versus writes.
 
 ## Suggested order
 
