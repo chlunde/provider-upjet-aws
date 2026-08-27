@@ -6,6 +6,7 @@ package clients
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -75,10 +76,7 @@ func TestGetCallerIdentity(t *testing.T) {
 					SessionToken:    "sampletoken",
 				},
 				cache: map[string]*callerIdentityCacheEntry{
-					"sampleaccess:samplesecret:sampletoken": {
-						GetCallerIdentityOutput: sample,
-						AccessedAt:              ti,
-					},
+					"sampleaccess:samplesecret:sampletoken": newCallerIdentityCacheEntry(sample, ti),
 				},
 			},
 			want: want{
@@ -97,26 +95,16 @@ func TestGetCallerIdentity(t *testing.T) {
 					SessionToken:    "sampletoken3",
 				},
 				cache: map[string]*callerIdentityCacheEntry{
-					"sampleaccess:samplesecret:sampletoken": {
-						GetCallerIdentityOutput: sample,
-						AccessedAt:              ti.Add(-time.Hour * 1),
-					},
-					"sampleaccess:samplesecret:sampletoken2": {
-						GetCallerIdentityOutput: sample,
-						AccessedAt:              ti.Add(-time.Hour * 5), // this should be deleted
-					},
+					"sampleaccess:samplesecret:sampletoken":  newCallerIdentityCacheEntry(sample, ti.Add(-time.Hour*1)),
+					"sampleaccess:samplesecret:sampletoken2": newCallerIdentityCacheEntry(sample, ti.Add(-time.Hour*5)), // this should be deleted
 				},
 				maxSize: 2,
 			},
 			want: want{
 				id: sample,
 				cache: map[string]*callerIdentityCacheEntry{
-					"sampleaccess:samplesecret:sampletoken": {
-						GetCallerIdentityOutput: sample,
-					},
-					"sampleaccess:samplesecret:sampletoken3": {
-						GetCallerIdentityOutput: sample,
-					},
+					"sampleaccess:samplesecret:sampletoken":  newCallerIdentityCacheEntry(sample, ti),
+					"sampleaccess:samplesecret:sampletoken3": newCallerIdentityCacheEntry(sample, ti),
 				},
 			},
 		},
@@ -142,11 +130,51 @@ func TestGetCallerIdentity(t *testing.T) {
 			}
 			if tc.want.cache != nil {
 				if diff := cmp.Diff(tc.want.cache, c.cache,
-					cmpopts.IgnoreFields(callerIdentityCacheEntry{}, "AccessedAt"),
-					cmpopts.IgnoreUnexported(sts.GetCallerIdentityOutput{}, middleware.Metadata{})); diff != "" {
+					cmpopts.IgnoreUnexported(callerIdentityCacheEntry{}, sts.GetCallerIdentityOutput{}, middleware.Metadata{})); diff != "" {
 					t.Fatalf("%s: GetCallerIdentity(...): -want, +got: %s", tc.reason, diff)
 				}
 			}
 		})
+	}
+}
+
+// TestGetCallerIdentityConcurrent exercises the cache-hit path with
+// synchronized bursts of goroutines that all observe a stale access time, so
+// that several of them refresh it while the others are still reading it.
+// Before accessedAt was made atomic, the refresh mutated the shared entry
+// while other goroutines were reading it without a lock, and this test failed
+// under the race detector.
+func TestGetCallerIdentityConcurrent(t *testing.T) {
+	sample := &sts.GetCallerIdentityOutput{
+		Account: ptr.To("123456789"),
+	}
+	creds := aws.Credentials{
+		AccessKeyID:     "sampleaccess",
+		SecretAccessKey: "samplesecret",
+		SessionToken:    "sampletoken",
+	}
+	for round := 0; round < 500; round++ {
+		c := NewCallerIdentityCache(
+			WithGetCallerIdentityFn(func(_ context.Context, _ aws.Config) (*sts.GetCallerIdentityOutput, error) {
+				return sample, nil
+			}),
+			WithCache(map[string]*callerIdentityCacheEntry{
+				"sampleaccess:samplesecret:sampletoken": newCallerIdentityCacheEntry(sample, time.Now().Add(-time.Hour)),
+			}),
+		)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < 32; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := c.GetCallerIdentity(context.Background(), aws.Config{}, creds); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
 	}
 }

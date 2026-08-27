@@ -209,26 +209,34 @@ func (c *AWSCredentialsProviderCache) RetrieveCredentials(ctx context.Context, p
 		return newCredentials(ctx, cacheEntry.awsCredCache, accountIDFromCacheEntry(cacheEntry))
 	}
 
+	// cache miss: resolve the account ID before taking the lock, because
+	// accountIDFn involves a network round trip to STS and holding the
+	// cache-wide write lock during that call would serialize every other
+	// reconciliation that needs credentials behind it. The price is that
+	// concurrent cache misses for the same key may each call STS once, which
+	// is much cheaper than blocking all keys behind one call.
+	c.logger.Debug("Cache miss", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String())
+	newEntry := &awsCredentialsProviderCacheEntry{
+		awsCredCache: awsCredsCache,
+	}
+	id, err := accountIDFn(ctx)
+	if err != nil {
+		return Credentials{}, errors.Wrap(err, errGetAccountID)
+	}
+	newEntry.accountID.Store(id)
+	newEntry.accessedAt.Store(time.Now())
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	// we need to recheck the cache because it might have already been
-	// populated.
+	// populated while we were resolving the account ID. If so, keep the
+	// existing entry so that all callers share the same aws.CredentialsCache.
 	cacheEntry, ok = c.cache[cacheKey]
 	if !ok {
-		// cache miss
-		c.logger.Debug("Cache miss", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String(), "cacheSize", len(c.cache))
 		c.makeRoom()
-		cacheEntry = &awsCredentialsProviderCacheEntry{
-			awsCredCache: awsCredsCache,
-		}
-		id, err := accountIDFn(ctx)
-		if err != nil {
-			return Credentials{}, errors.Wrap(err, errGetAccountID)
-		}
-		cacheEntry.accountID.Store(id)
-		cacheEntry.accessedAt.Store(time.Now())
-		c.cache[cacheKey] = cacheEntry
+		c.cache[cacheKey] = newEntry
+		cacheEntry = newEntry
 	}
+	c.mu.Unlock()
 	return newCredentials(ctx, cacheEntry.awsCredCache, accountIDFromCacheEntry(cacheEntry))
 }
 

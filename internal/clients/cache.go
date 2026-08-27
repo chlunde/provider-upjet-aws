@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -90,7 +91,17 @@ type CallerIdentityCache struct {
 
 type callerIdentityCacheEntry struct {
 	*sts.GetCallerIdentityOutput
-	AccessedAt time.Time
+	// accessedAt stores a time.Time and is read on the hot path without
+	// holding any lock, so it must be accessed atomically.
+	accessedAt atomic.Value
+}
+
+// newCallerIdentityCacheEntry returns a new *callerIdentityCacheEntry with
+// its access time initialized.
+func newCallerIdentityCacheEntry(o *sts.GetCallerIdentityOutput, accessedAt time.Time) *callerIdentityCacheEntry {
+	e := &callerIdentityCacheEntry{GetCallerIdentityOutput: o}
+	e.accessedAt.Store(accessedAt)
+	return e
 }
 
 // GetCallerIdentity returns the identity of the caller.
@@ -105,13 +116,15 @@ func (c *CallerIdentityCache) GetCallerIdentity(ctx context.Context, cfg aws.Con
 	c.mu.RUnlock()
 	if ok {
 		// Because this is in the hot path of the execution, i.e. all CRs get
-		// here in every reconciliation, we don't want to block with a lock
-		// unless it's really necessary. Even an unnecessary cache invalidation
-		// is fine since the cost is one additional API call.
-		if time.Since(o.AccessedAt) > 10*time.Minute {
-			c.mu.Lock()
-			o.AccessedAt = time.Now()
-			c.mu.Unlock()
+		// here in every reconciliation, we don't want to block with a lock.
+		// The access time is stored atomically so that concurrent readers do
+		// not race with its refresh, and we don't refresh it on every hit so
+		// that the entry is not written in every reconciliation. Concurrent
+		// refreshes may overwrite each other, which is fine because any of
+		// the stored values is recent enough for the LRU eviction to be
+		// meaningful.
+		if time.Since(o.accessedAt.Load().(time.Time)) > 10*time.Minute {
+			o.accessedAt.Store(time.Now())
 		}
 		return o.GetCallerIdentityOutput, nil
 	}
@@ -122,10 +135,7 @@ func (c *CallerIdentityCache) GetCallerIdentity(ctx context.Context, cfg aws.Con
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.makeRoom()
-	c.cache[key] = &callerIdentityCacheEntry{
-		AccessedAt:              time.Now(),
-		GetCallerIdentityOutput: i,
-	}
+	c.cache[key] = newCallerIdentityCacheEntry(i, time.Now())
 	return i, nil
 }
 
@@ -141,7 +151,7 @@ func (c *CallerIdentityCache) makeRoom() {
 		if dustiest == "" {
 			dustiest = key
 		}
-		if val.AccessedAt.Before(c.cache[dustiest].AccessedAt) {
+		if val.accessedAt.Load().(time.Time).Before(c.cache[dustiest].accessedAt.Load().(time.Time)) {
 			dustiest = key
 		}
 	}
