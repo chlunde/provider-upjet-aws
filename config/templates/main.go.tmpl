@@ -229,6 +229,11 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	namespacedProvider, err := config.GetProviderNamespaced(ctx, fwProvider, sdkProvider, false, *skipDefaultTags)
 	kingpin.FatalIfError(err, "Cannot initialize the namespaced provider configuration")
 
+	// The cluster-scoped and namespaced controllers share a single global
+	// rate limiter so that the aggregate reconcile rate across both scopes
+	// stays within *maxReconcileRate.
+	globalRateLimiter := ratelimiter.NewGlobal(*maxReconcileRate)
+
 	clusterSetupConfig := &clients.SetupConfig{
 		Logger:            logr,
 		TerraformProvider: clusterProvider.TerraformProvider,
@@ -236,7 +241,7 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	clusterOptions := tjcontroller.Options{
 		Options: xpcontroller.Options{
 			Logger:                  logr,
-			GlobalRateLimiter:       ratelimiter.NewGlobal(*maxReconcileRate),
+			GlobalRateLimiter:       globalRateLimiter,
 			PollInterval:            *pollInterval,
 			MaxConcurrentReconciles: *maxReconcileRate,
 			Features:                &feature.Flags{},
@@ -259,7 +264,7 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	namespacedOptions := tjcontroller.Options{
 		Options: xpcontroller.Options{
 			Logger:                  logr,
-			GlobalRateLimiter:       ratelimiter.NewGlobal(*maxReconcileRate),
+			GlobalRateLimiter:       globalRateLimiter,
 			PollInterval:            *pollInterval,
 			MaxConcurrentReconciles: *maxReconcileRate,
 			Features:                &feature.Flags{},
