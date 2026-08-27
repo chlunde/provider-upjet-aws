@@ -19,6 +19,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-provider-aws/xpprovider"
 	"github.com/pkg/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	namespacedv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/v1beta1"
@@ -103,13 +104,9 @@ func SelectTerraformSetup(config *SetupConfig) terraform.SetupFn { // nolint:goc
 		// partition-specific one is substituted, because the TF AWS provider
 		// requires a non-empty region and so does the sts:GetCallerIdentity
 		// used to resolve the account ID.
-		region, err := getRegion(mg)
+		region, err := effectiveRegion(mg, pc)
 		if err != nil {
 			return terraform.Setup{}, errors.Wrap(err, "cannot get region")
-		}
-		if region == "" {
-			gvk := mg.GetObjectKind().GroupVersionKind()
-			region = getGlobalRegion(gvk.Group, gvk.Kind, pc)
 		}
 
 		ps := terraform.Setup{}
@@ -206,6 +203,25 @@ func getAccountId(ctx context.Context, cfg *aws.Config, creds aws.Credentials) (
 		return "", errors.Wrap(err, "cannot get the caller identity")
 	}
 	return *identity.Account, nil
+}
+
+// effectiveRegion returns the region to resolve credentials and the AWS config
+// for. Managed resources in global API groups carry no region of their own, so
+// a partition-specific one is substituted: the Terraform AWS provider requires
+// a non-empty region, and so does the sts:GetCallerIdentity used to resolve the
+// account ID. This must be applied before the region is used as part of a cache
+// key, so that a global-group resource and a regional one do not share an entry
+// resolved without a region.
+func effectiveRegion(mg runtime.Object, pc *namespacedv1beta1.ClusterProviderConfig) (string, error) {
+	region, err := getRegion(mg)
+	if err != nil {
+		return "", err
+	}
+	if region != "" {
+		return region, nil
+	}
+	gvk := mg.GetObjectKind().GroupVersionKind()
+	return getGlobalRegion(gvk.Group, gvk.Kind, pc), nil
 }
 
 // getGlobalRegion returns the appropriate region for global resources and API groups
