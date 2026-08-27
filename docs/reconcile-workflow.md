@@ -46,6 +46,9 @@ params, late-initialises, writes `status.atProvider`, and reports
 **`Create`** applies the diff, stores the new state, derives the external-name
 from the returned state, and returns connection details.
 
+Actionable fixes drawn from this analysis, with tests and suggested issues, are
+in [`fixes/`](fixes/README.md).
+
 ## Findings
 
 ### 1. Correctness: diff-time and apply-time schemas disagree for 30 resources
