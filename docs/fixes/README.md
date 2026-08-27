@@ -54,7 +54,7 @@ Deliberately excluded, with reasons:
 | [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | not started |
 | [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | not started |
 | [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | medium (latent) | small | upjet | **implemented, verified** — `fix-fieldpath-segmentwise-camel-snake` @ `046b8f2` |
-| [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | not started |
+| [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | **reviewed, ready** — `fix/cache-credentials-for-all-sources` @ `d3d61421a1` |
 | [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
 | [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | not started |
 | [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | **ready, re-priced** — `fix/scope-secret-informer` @ `18fa5d097`, see audit-cost note |
@@ -354,6 +354,48 @@ Verified here: reverting the helper to whole-path conversion fails six subtests
 with diffs like `-"foo_bar[0].baz_qux" +"foo_bar_[_0_]._baz_qux"`, and the
 end-to-end merge produces `{"foo_bar_": {"_0_": {"_baz_qux": ...}}}`. Full upjet
 suite green. No existing tests covered these functions, so none were changed.
+
+### 08 — cache credentials per ProviderConfig
+
+Ready at `d3d61421a1`. Credential resolution was per managed resource when the
+result depends only on the ProviderConfig and region; caching collapses N
+managed resources into one resolution per TTL. On a hit there is no Kubernetes
+read and no STS call.
+
+**Review halved it.** The first implementation was 325+/171− with 11 new
+functions and types, against a brief asking for a simple, obvious patch. Cut to
+6 new functions and net +85 lines of production code, with the entire
+`provider_config.go` diff removed — it changed the IRSA and WebIdentity paths in
+service of fix 03, which this change does not fix.
+
+What survived scrutiny, on evidence: `singleflight` stays, because the
+alternative that also prevents concurrent callers each doing the slow work is a
+lock held across resolution — which is precisely the fix-12 bug, and removing
+`singleflight` was mutation-tested to produce 32 Secret reads and 32 account-ID
+resolutions instead of one. Invalidate-on-`Retrieve`-failure stays: it is what
+keeps the rotation window honest. The IRSA no-expiry special case stays because
+the brief forbade changing behaviour that already worked.
+
+**Review also found a regression in the branch as first pushed.** It keyed on
+the raw `spec.forProvider.region` and applied the global-API-group default
+afterwards, so `sts:GetCallerIdentity` ran with an empty region for every global
+group — `iam`, `route53`, `cloudfront`, `organizations`. Under `source: Secret`
+there is no IRSA webhook supplying `AWS_REGION`, so that is a `MissingRegion`
+failure on every IAM and Route53 reconcile, not a corner case.
+
+That fix was reasoned but **uncovered**: re-introducing the bug left the whole
+suite green. Resolution was extracted into `effectiveRegion` and covered
+(`aws_region_test.go`) across the regional, global cluster-scoped, global
+namespaced, explicitly overridden and non-global cases; the bug now fails two of
+them. `go build`, `go vet`, `go test` and `gofmt` all pass; nine other mutants
+were killed by the branch's own suite.
+
+**The trade a human must accept:** a 5-minute TTL is the upper bound on how long
+a rotated credential Secret goes unnoticed, because rotating a Secret does not
+change the ProviderConfig's generation, so nothing but the TTL can invalidate
+the entry. The TTL is deliberately below the 15-minute minimum STS session
+duration so a cached provider is re-resolved before the SDK would refresh it
+from a possibly-cancelled reconcile context.
 
 ## Suggested order
 
