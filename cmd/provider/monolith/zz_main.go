@@ -96,7 +96,7 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 
 		enableManagementPolicies = app.Flag("enable-management-policies", "Enable support for Management Policies.").Default("true").Envar("ENABLE_MANAGEMENT_POLICIES").Bool()
 		enableChangeLogs         = app.Flag("enable-changelogs", "Enable support for capturing change logs during reconciliation.").Default("false").Envar("ENABLE_CHANGE_LOGS").Bool()
-		enableSecretCache        = app.Flag("enable-secret-cache", "Enable caching for Secrets. Disabling this can reduce memory usage at the cost of additional API server load.").Default("true").Envar("ENABLE_SECRET_CACHE").Bool()
+		enableSecretCache        = app.Flag("enable-secret-cache", "Cache Secrets in the manager's client. This starts a cluster-wide Secret informer with no selector, so provider memory grows with every Secret in the cluster; enable it only to trade that memory for fewer API server reads.").Default("false").Envar("ENABLE_SECRET_CACHE").Bool()
 
 		certsDirSet = false
 		// we record whether the command-line option "--certs-dir" was supplied
@@ -169,8 +169,16 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	kingpin.FatalIfError(resolverapis.BuildScheme(namespacedapis.AddToSchemes), "Cannot register namespaced AWS APIs with the API resolver's runtime scheme")
 	kingpin.FatalIfError(apiextensionsv1.AddToScheme(scheme), "Cannot add api-extensions APIs to scheme")
 
-	// Secret caching is enabled by default. Disabling it trades API server
-	// load for lower provider memory usage.
+	// Secret caching is disabled by default, so Secret reads are live API
+	// server requests. Caching Secrets means a cluster-wide informer with no
+	// selector: the provider then holds every Secret in the cluster in
+	// memory, not only the ones it reads. Scoping the cache with a selector
+	// is not a safe alternative, because credential and connection Secrets
+	// are referenced by arbitrary namespace/name (ProviderConfig
+	// credentials, web identity token Secrets, managed resource secret refs
+	// and connection details) and the cache-backed client returns NotFound
+	// for objects outside a selector instead of falling through to the API
+	// server.
 	var clientOpts client.Options
 	if !*enableSecretCache {
 		clientOpts = client.Options{
