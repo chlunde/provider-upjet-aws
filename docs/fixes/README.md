@@ -47,7 +47,7 @@ Deliberately excluded, with reasons:
 
 | # | fix | category | severity | size | lives in | status |
 | - | --- | --- | --- | --- | --- | --- |
-| [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | not started |
+| [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | in progress — `fix/movetostatus-copy-before-mutate` |
 | [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet (or here) | not started |
 | [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | not started |
 | [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | not started |
@@ -57,7 +57,7 @@ Deliberately excluded, with reasons:
 | [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | not started |
 | [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
 | [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | not started |
-| [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | not started |
+| [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | **reviewed, ready** — `fix/scope-secret-informer` @ `18fa5d097` |
 | [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | **ready, one caveat** — `fix/identity-cache-race-and-lock-scope` @ `efb86ceee` |
 | [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | **reviewed, ready** — `fix/single-global-rate-limiter` @ `2de61d751` |
 
@@ -121,6 +121,46 @@ was deleted during disk recovery and the result can no longer be audited. What
 package, and the regression test is well formed — 500 rounds of 32 goroutines
 released together against a deliberately stale entry, so every goroutine takes
 the refresh branch. CI running `-race` is what proves this change.
+
+### 11 — cluster-wide Secret informer
+
+Reviewed and ready, at `18fa5d097`. **The fix this repository's analysis proposed
+was wrong, and was rejected on evidence.** All three selector options in
+`11-scope-secret-informer.md` are unsafe: in controller-runtime v0.24.1
+`client.Get` routes to the cache unless the type is in `DisableFor`
+(`pkg/client/client.go:368-374`) and the cache reader returns `NewNotFound` for
+an object absent from the informer store (`cache_reader.go:73-79`). There is no
+live-read fallback, and the provider reads Secrets at arbitrary user-chosen
+namespace/name. A selector would silently break credential resolution and wedge
+connection publishing. Informer selectors are also fixed at creation, so the
+"restrict to referenced namespaces" option is impossible outright.
+
+What shipped instead: `--enable-secret-cache` defaults to `false`, keeping the
+cache as an explicit opt-in.
+
+The review priced the trade rather than assuming it. Added reads are one
+`client.Get` per reconcile for `source: Secret` only — IRSA, Pod Identity and
+Upbound read no Secret at all — giving 1.7 GET/s at 1,000 such MRs and 8.3 at
+5,000, against etcd's ~10k reads/s. Against that: an informer over every Secret
+in the cluster, ~80–120 MB of live objects per family pod for a mid-size
+cluster, multiplied across ~15 pods, plus a full cluster-wide Secret LIST at
+first credential read. Bounded and small versus unbounded and multiplied.
+
+Two corrections came out of it. The claim that the new reads are bounded by
+`ratelimiter.LimitRESTConfig` is **false** — that sets QPS 500 / burst 1000 per
+pod at the default `--max-reconcile-rate`, roughly 60× the added load, so it
+never engages; the real bound is the poll interval. And the flag has **never
+shipped**: it landed in `b9e20fbfe` (2026-08-20), after `v2.7.0`
+(`e5e520ffc7`, 2026-08-10), and is contained in no tag — verified independently.
+So no existing configuration changes meaning; the release note is about
+behaviour against v2.7.0, which cached Secrets implicitly by passing no client
+options at all.
+
+A client wrapper falling back to a live read on cache miss was considered and
+rejected: it still requires a selector to get any hit at all, it introduces
+stale reads on a write path (`APIPatchingApplicator.Apply` reads before
+patching), it wins no RBAC narrowing, and it means hand-maintaining a
+`client.Client` across 178 binaries to avoid single-digit GET/s.
 
 ## Suggested order
 
