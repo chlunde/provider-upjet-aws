@@ -45,21 +45,59 @@ Deliberately excluded, with reasons:
 
 ## The fixes
 
-| # | fix | category | severity | size | lives in | evidence |
+| # | fix | category | severity | size | lives in | status |
 | - | --- | --- | --- | --- | --- | --- |
-| [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | measured |
-| [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet (or here) | measured |
-| [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | read |
-| [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | read |
-| [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | read |
-| [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | read |
-| [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | high (latent) | medium | upjet | measured |
-| [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | read |
-| [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | measured |
-| [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | measured |
-| [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | read |
-| [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | measured |
-| [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | read |
+| [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | not started |
+| [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet (or here) | not started |
+| [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | not started |
+| [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | not started |
+| [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | not started |
+| [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | not started |
+| [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | high (latent) | medium | upjet | not started |
+| [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | not started |
+| [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
+| [10](10-gate-namespaced-build.md) | Build the namespaced provider only when it is used | waste | high | medium | this repo | not started |
+| [11](11-scope-secret-informer.md) | The Secret informer is cluster-wide and unbounded | security | medium-high | **small** | this repo | not started |
+| [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | not started |
+| [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | **reviewed, ready** — `fix/single-global-rate-limiter` @ `2de61d751` |
+
+## Progress
+
+Each fix gets its own branch off upstream `main` (`88c5c3776`), an implementation
+pass and an independent review pass. No pull requests are opened. Branches are
+pushed to `origin`; PR descriptions live outside the repo so they do not pollute
+the diff they describe.
+
+**Verification ceiling.** Nothing here has run against a live AWS account or a
+cluster, and the Go build cache was flushed early in this work, so builds that
+link `xpprovider` now cost ~30 minutes cold. Where a compile-level check was too
+expensive to run, the fix says so rather than implying one passed. CI is expected
+to provide it.
+
+### 13 — single global rate limiter
+
+Reviewed and ready. Two commits: the fix, plus a review correction making the
+regression test match the shared-limiter reference by regex instead of gofmt's
+current column padding, which would have failed misleadingly on an unrelated
+field rename.
+
+The review settled the question the analysis had not: **sharing one limiter is
+correct**, and the previous code violated crossplane-runtime's own contract, not
+just the flag's help text. `NewGlobal` returns a token-bucket limiter whose
+`When` ignores the queue item and holds no per-item state; both scopes register
+controllers on a single manager; and `Options.GlobalRateLimiter` is documented as
+bounding reconciles across all of that manager's controllers.
+`ratelimiter.LimitRESTConfig` was already applied once to that manager, so the
+API-server budget was computed once while the reconcile budget was computed
+twice.
+
+`MaxConcurrentReconciles` was ruled deliberately out of scope: it is a
+per-controller worker count, not a shared budget, so it was never doubled in the
+way the limiter was.
+
+Open for a human: CI must supply the compile check — the regression test parses
+the generated mains rather than compiling them, and each is its own `package
+main`. The throughput change needs a release note.
 
 ## Suggested order
 
