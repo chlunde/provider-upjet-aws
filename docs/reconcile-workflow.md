@@ -15,7 +15,9 @@ Measured with `hack/memprofile/reconcile` against this tree.
 A companion document, [`reconcile-workflow-detail.md`](reconcile-workflow-detail.md),
 completes the finding-1 inventory, covers the async/update/delete/framework
 paths and the conversions, and adds a larger finding about schema objects
-shared between resources.
+shared between resources. [`architecture-wins.md`](architecture-wins.md) ranks
+the structural changes — polling model, per-scope builds, caches, and the
+per-reconcile pipeline — that follow from all three documents.
 
 ## The workflow
 

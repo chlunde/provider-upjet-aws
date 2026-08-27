@@ -14,7 +14,10 @@ Two kinds of measurement:
 * `hack/memprofile/startup` reproduces the provider's startup allocation path
   (`AddToScheme` -> `xpprovider.GetProvider` -> `config.GetProvider{,Namespaced}`)
   and attributes **live heap** and **RSS** to each step. It then simulates a few
-  candidate optimisations and reports what each would reclaim.
+  candidate optimisations and reports what each would reclaim. A P1-P3
+  section times the scope-independent parse phases inside each
+  `config.GetProvider*` build in isolation (run from the repository root so
+  it can read `config/schema.json`).
 
 * `hack/memprofile/reconcile` measures the per-reconcile costs of the Connect
   and Observe path — the schema rebuilds, the AWS client and framework provider
@@ -22,10 +25,13 @@ Two kinds of measurement:
   the schema the Terraform SDK actually uses. It also prints the complete
   schema-divergence inventory, probes `SchemaFunc` pointer stability, measures
   the Terraform Plugin Framework per-Connect work, and runs diff experiments
-  for the shared-singleton contamination. With `SCHEMA_DUMP=<path>` it writes a
+  for the shared-singleton contamination. Section 8 measures the steady-state
+  params->cty->InstanceState->diff translation cost with `SchemaFunc` cleared,
+  and section 9 the typed-MR JSON round trips and the per-object DeepCopy the
+  state-metrics recorder pays. With `SCHEMA_DUMP=<path>` it writes a
   flag dump of the fully configured provider for comparison with
-  `hack/memprofile/schemadump`. See `docs/reconcile-workflow.md` and
-  `docs/reconcile-workflow-detail.md`.
+  `hack/memprofile/schemadump`. See `docs/reconcile-workflow.md`,
+  `docs/reconcile-workflow-detail.md` and `docs/architecture-wins.md`.
 
 * `hack/memprofile/schemadump` prints the same flag dump from a pristine
   process — the Terraform AWS provider without any of this repository's

@@ -18,6 +18,9 @@ import (
 	"time"
 
 	"github.com/crossplane/upjet/v2/pkg/config"
+	"github.com/crossplane/upjet/v2/pkg/registry"
+	conversiontfjson "github.com/crossplane/upjet/v2/pkg/types/conversion/tfjson"
+	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/hashicorp/terraform-provider-aws/xpprovider"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -121,6 +124,47 @@ func main() {
 	if os.Getenv("GROUPS") != "" {
 		printGroupHistogram(clusterProvider)
 	}
+
+	measureScopeIndependentPhases()
+}
+
+// measureScopeIndependentPhases times, in isolation, the phases of
+// config.NewProvider that are identical for the cluster-scoped and namespaced
+// builds: the tfjson unmarshal of the embedded JSON schema, its conversion to
+// plugin-SDK resources, and the registry-metadata parse. Whatever the two
+// builds cost beyond this is the genuinely per-scope work. Reads the same
+// files config/ embeds, so it must run from the repository root.
+func measureScopeIndependentPhases() {
+	schemaBytes, err := os.ReadFile("config/schema.json")
+	if err != nil {
+		fmt.Printf("\n(skipping scope-independent phase timing: %v)\n", err)
+		return
+	}
+	metaBytes, err := os.ReadFile("config/provider-metadata.yaml")
+	if err != nil {
+		fmt.Printf("\n(skipping scope-independent phase timing: %v)\n", err)
+		return
+	}
+
+	fmt.Println("\n--- scope-independent phases inside each config.GetProvider* build ---")
+	begin()
+	ps := tfjson.ProviderSchemas{}
+	must(ps.UnmarshalJSON(schemaBytes))
+	step(fmt.Sprintf("P1. tfjson unmarshal of schema.json (%.1f MB)", float64(len(schemaBytes))/(1<<20)))
+
+	var rs map[string]*tfjson.Schema
+	for _, v := range ps.Schemas {
+		rs = v.ResourceSchemas
+		break
+	}
+	rm := conversiontfjson.GetV2ResourceMap(rs)
+	step(fmt.Sprintf("P2. GetV2ResourceMap (%d resources)", len(rm)))
+
+	pm, err := registry.NewProviderMetadataFromFile(metaBytes)
+	must(err)
+	step(fmt.Sprintf("P3. registry metadata parse (%d resources)", len(pm.Resources)))
+	runtime.KeepAlive(rm)
+	runtime.KeepAlive(pm)
 }
 
 // dropMeta releases the Terraform registry metadata, which only the code

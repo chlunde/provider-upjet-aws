@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/crossplane/upjet/v2/pkg/config"
+	upjetresource "github.com/crossplane/upjet/v2/pkg/resource"
+	upjson "github.com/crossplane/upjet/v2/pkg/resource/json"
 	fwprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
@@ -30,6 +32,8 @@ import (
 	tf "github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 	"github.com/hashicorp/terraform-provider-aws/xpprovider"
 
+	ec2v1beta2 "github.com/upbound/provider-aws/v2/apis/cluster/ec2/v1beta2"
+	iamv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/iam/v1beta1"
 	awsconfig "github.com/upbound/provider-aws/v2/config"
 )
 
@@ -266,6 +270,14 @@ func main() {
 	if tfClient != nil {
 		tagsDiffExperiment(ctx, pc, tfClient)
 	}
+
+	fmt.Println("\n=== 8. Steady-state per-reconcile translation cost (the TF-SDK shim, AWS read excluded) ===")
+	if tfClient != nil {
+		steadyStateShimExperiment(ctx, pc, tfClient)
+	}
+
+	fmt.Println("\n=== 9. Typed-MR JSON round trips and DeepCopy (status write-back and state metrics) ===")
+	typedMRExperiment()
 
 	// SCHEMA_DUMP=<path>: dump the flags of every attribute as the configured
 	// runtime sees them (SchemaMap() of the configured provider), in the same
@@ -684,6 +696,282 @@ func measureFrameworkConnectPath(ctx context.Context, pc *config.Provider, tfCli
 		})
 		fmt.Printf("   %-40s getResourceSchema: %10s, %8s KB per Connect\n", name, ds.Round(time.Microsecond), kb(as))
 	}
+}
+
+// roleStateMap returns a realistic post-refresh JSON state map for a small,
+// flat resource (aws_iam_role).
+func roleStateMap() map[string]any {
+	return map[string]any{
+		"id":                    "app-role",
+		"arn":                   "arn:aws:iam::123456789012:role/app-role",
+		"assume_role_policy":    `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"eks.amazonaws.com"},"Action":"sts:AssumeRole"}]}`,
+		"create_date":           "2024-01-01T00:00:00Z",
+		"description":           "role for the shim cost probe",
+		"force_detach_policies": false,
+		"max_session_duration":  float64(3600),
+		"name":                  "app-role",
+		"path":                  "/",
+		"tags":                  map[string]any{"env": "prod", "team": "platform"},
+		"tags_all":              map[string]any{"env": "prod", "team": "platform"},
+		"unique_id":             "AROAEXAMPLEID",
+	}
+}
+
+// roleCfgMap is the steady-state desired configuration matching roleStateMap.
+func roleCfgMap() map[string]any {
+	return map[string]any{
+		"assume_role_policy":    `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"eks.amazonaws.com"},"Action":"sts:AssumeRole"}]}`,
+		"description":           "role for the shim cost probe",
+		"force_detach_policies": false,
+		"max_session_duration":  float64(3600),
+		"name":                  "app-role",
+		"path":                  "/",
+		"tags":                  map[string]any{"env": "prod", "team": "platform"},
+		"tags_all":              map[string]any{"env": "prod", "team": "platform"},
+	}
+}
+
+// instanceStateMap returns a realistic post-refresh JSON state map for a
+// large resource (aws_instance) with a nested block and collection attrs.
+func instanceStateMap() map[string]any {
+	return map[string]any{
+		"id":                          "i-0123456789abcdef0",
+		"ami":                         "ami-0abcdef1234567890",
+		"arn":                         "arn:aws:ec2:us-east-1:123456789012:instance/i-0123456789abcdef0",
+		"associate_public_ip_address": false,
+		"availability_zone":           "us-east-1a",
+		"ebs_optimized":               true,
+		"instance_state":              "running",
+		"instance_type":               "m5.large",
+		"key_name":                    "ops",
+		"monitoring":                  false,
+		"private_dns":                 "ip-10-0-0-10.ec2.internal",
+		"private_ip":                  "10.0.0.10",
+		"region":                      "us-east-1",
+		"root_block_device": []any{map[string]any{
+			"delete_on_termination": true,
+			"device_name":           "/dev/xvda",
+			"encrypted":             true,
+			"iops":                  float64(3000),
+			"throughput":            float64(125),
+			"volume_id":             "vol-0123456789abcdef0",
+			"volume_size":           float64(50),
+			"volume_type":           "gp3",
+			"tags":                  map[string]any{"env": "prod"},
+		}},
+		"source_dest_check":      true,
+		"subnet_id":              "subnet-0123456789abcdef0",
+		"tags":                   map[string]any{"env": "prod", "team": "platform", "app": "web"},
+		"tags_all":               map[string]any{"env": "prod", "team": "platform", "app": "web"},
+		"tenancy":                "default",
+		"vpc_security_group_ids": []any{"sg-0123456789abcdef0", "sg-0123456789abcdef1"},
+	}
+}
+
+// instanceCfgMap is the steady-state desired configuration matching
+// instanceStateMap (computed-only attributes removed).
+func instanceCfgMap() map[string]any {
+	return map[string]any{
+		"ami":                         "ami-0abcdef1234567890",
+		"associate_public_ip_address": false,
+		"ebs_optimized":               true,
+		"instance_type":               "m5.large",
+		"key_name":                    "ops",
+		"monitoring":                  false,
+		"region":                      "us-east-1",
+		"root_block_device": []any{map[string]any{
+			"delete_on_termination": true,
+			"encrypted":             true,
+			"iops":                  float64(3000),
+			"throughput":            float64(125),
+			"volume_size":           float64(50),
+			"volume_type":           "gp3",
+			"tags":                  map[string]any{"env": "prod"},
+		}},
+		"source_dest_check":      true,
+		"subnet_id":              "subnet-0123456789abcdef0",
+		"tags":                   map[string]any{"env": "prod", "team": "platform", "app": "web"},
+		"tags_all":               map[string]any{"env": "prod", "team": "platform", "app": "web"},
+		"tenancy":                "default",
+		"vpc_security_group_ids": []any{"sg-0123456789abcdef0", "sg-0123456789abcdef1"},
+	}
+}
+
+// steadyStateShimExperiment measures the params->cty->InstanceState->diff->
+// JSON-map round trip that Connect+Observe pay on every reconcile, with the
+// AWS read excluded and SchemaFunc cleared so the numbers isolate the
+// intrinsic translation cost that remains after the schema-rebuild fix from
+// section 3.
+func steadyStateShimExperiment(ctx context.Context, pc *config.Provider, meta any) {
+	type probe struct {
+		name       string
+		state, cfg map[string]any
+	}
+	shimProbes := []probe{
+		{"aws_iam_role", roleStateMap(), roleCfgMap()},
+		{"aws_instance", instanceStateMap(), instanceCfgMap()},
+	}
+	fmt.Printf("   %-14s %-42s %10s %10s\n", "resource", "step", "time", "alloc KB")
+	for _, p := range shimProbes {
+		r := pc.Resources[p.name]
+		if r == nil || r.TerraformResource == nil {
+			continue
+		}
+		tr := r.TerraformResource
+		savedFunc := tr.SchemaFunc
+		tr.SchemaFunc = nil
+		block := tr.CoreConfigSchema()
+		impliedType := block.ImpliedType()
+
+		row := func(step string, d time.Duration, a uint64) {
+			fmt.Printf("   %-14s %-42s %10s %10s\n", strings.TrimPrefix(p.name, "aws_"), step, d.Round(time.Microsecond), kb(a))
+		}
+
+		// Connect: params -> cty (JSONMapToStateValue on the merged params)
+		d1, a1 := allocs(50, func() {
+			if _, err := schema.JSONMapToStateValue(p.cfg, block); err != nil {
+				panic(err)
+			}
+		})
+		row("Connect: params->cty (JSONMapToStateValue)", d1, a1)
+		rawConfig, err := schema.JSONMapToStateValue(p.cfg, block)
+		must(err)
+		stateVal, err := schema.JSONMapToStateValue(p.state, block)
+		must(err)
+
+		// Connect, cold only: cty -> InstanceState (state reconstruction)
+		d2, a2 := allocs(50, func() {
+			if _, err := tr.ShimInstanceStateFromValue(stateVal); err != nil {
+				panic(err)
+			}
+		})
+		row("Connect(cold): cty->InstanceState (shim)", d2, a2)
+		st, err := tr.ShimInstanceStateFromValue(stateVal)
+		must(err)
+		st.RawPlan = stateVal
+		st.RawConfig = rawConfig
+
+		// Observe: InstanceState attrs -> cty -> JSON map
+		d3, a3 := allocs(50, func() {
+			v, err := st.AttrsAsObjectValue(impliedType)
+			if err != nil {
+				panic(err)
+			}
+			if _, err := schema.StateValueToJSONMap(v, impliedType); err != nil {
+				panic(err)
+			}
+		})
+		row("Observe: state->cty->JSON map", d3, a3)
+		v, err := st.AttrsAsObjectValue(impliedType)
+		must(err)
+		stateMap, err := schema.StateValueToJSONMap(v, impliedType)
+		must(err)
+
+		// Observe: the InstanceDiff (with the resource's CustomizeDiff chain)
+		var lastDiff *tf.InstanceDiff
+		var diffErr error
+		d4, a4 := allocs(20, func() {
+			rc := tf.NewResourceConfigRaw(p.cfg)
+			d, err := schema.InternalMap(tr.Schema).Diff(ctx, st, rc, tr.CustomizeDiff, meta, false)
+			if err != nil {
+				diffErr = err
+				return
+			}
+			lastDiff = d
+		})
+		if diffErr != nil {
+			fmt.Printf("   %-14s %-42s error: %v\n", strings.TrimPrefix(p.name, "aws_"), "Observe: InstanceDiff", diffErr)
+		} else {
+			empty := lastDiff == nil || lastDiff.Empty()
+			row(fmt.Sprintf("Observe: InstanceDiff (empty=%v)", empty), d4, a4)
+			if !empty {
+				keys := make([]string, 0, len(lastDiff.Attributes))
+				for k := range lastDiff.Attributes {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				fmt.Printf("   %-14s   residual diff keys: %s\n", strings.TrimPrefix(p.name, "aws_"), strings.Join(keys, " "))
+			}
+		}
+
+		// Observe: marshal the state map for late-initialization
+		d5, a5 := allocs(50, func() {
+			if _, err := upjson.TFParser.Marshal(stateMap); err != nil {
+				panic(err)
+			}
+		})
+		row("Observe: TFParser.Marshal (late-init buf)", d5, a5)
+
+		row("total per steady reconcile (warm state)", d1+d3+d4+d5, a1+a3+a4+a5)
+		tr.SchemaFunc = savedFunc
+	}
+}
+
+// typedMRExperiment measures the typed-object costs the reconcile pays per
+// cycle regardless of the Terraform layer: SetObservation/GetObservation/
+// LateInitialize JSON round trips, and the DeepCopy the cached client's List
+// performs per object every --poll-state-metric interval (default 5s) for the
+// MR state metrics recorder.
+func typedMRExperiment() {
+	fmt.Printf("   %-14s %-42s %10s %10s\n", "resource", "step", "time", "alloc KB")
+
+	role := &iamv1beta1.Role{}
+	roleBuf, err := upjson.TFParser.Marshal(roleStateMap())
+	must(err)
+	measureTyped("iam_role", role, roleStateMap(), roleBuf)
+
+	// v1beta2.Instance has singleton lists converted to embedded objects, so
+	// feed it the state as ApplyTFConversions(FromTerraform) would have
+	// reshaped it: root_block_device as an object, not a one-element list.
+	instState := instanceStateMap()
+	if l, ok := instState["root_block_device"].([]any); ok && len(l) == 1 {
+		instState["root_block_device"] = l[0]
+	}
+	inst := &ec2v1beta2.Instance{}
+	instBuf, err := upjson.TFParser.Marshal(instState)
+	must(err)
+	measureTyped("instance", inst, instState, instBuf)
+
+	roleJSON, err := json.Marshal(role)
+	must(err)
+	instJSON, err := json.Marshal(inst)
+	must(err)
+	fmt.Printf("\n   serialized object size (the payload of every per-poll status PUT): iam_role=%d B, instance=%d B\n", len(roleJSON), len(instJSON))
+
+	fmt.Println("\n   state-metrics DeepCopy churn if every MR were this kind (cache List copies each object):")
+	for _, n := range []int{100, 1000, 5000} {
+		_, a := allocs(100, func() { _ = inst.DeepCopy() })
+		perSec := float64(a) * float64(n) / 5.0 / (1 << 20)
+		fmt.Printf("   %6d aws_instance MRs at --poll-state-metric=5s : %6.1f MB/s of DeepCopy garbage\n", n, perSec)
+	}
+}
+
+func measureTyped(label string, tr upjetresource.Terraformed, stateMap map[string]any, buf []byte) {
+	row := func(step string, d time.Duration, a uint64) {
+		fmt.Printf("   %-14s %-42s %10s %10s\n", label, step, d.Round(time.Microsecond), kb(a))
+	}
+	d, a := allocs(100, func() { must(tr.SetObservation(stateMap)) })
+	row("SetObservation (JSON->status.atProvider)", d, a)
+	d, a = allocs(100, func() {
+		if _, err := tr.LateInitialize(buf); err != nil {
+			panic(err)
+		}
+	})
+	row("LateInitialize (JSON->spec merge)", d, a)
+	d, a = allocs(100, func() {
+		if _, err := tr.GetObservation(); err != nil {
+			panic(err)
+		}
+	})
+	row("GetObservation (status->JSON map)", d, a)
+	d, a = allocs(100, func() {
+		if _, err := tr.GetParameters(); err != nil {
+			panic(err)
+		}
+	})
+	row("GetParameters (spec->JSON map)", d, a)
+	d, a = allocs(100, func() { _ = tr.DeepCopyObject() })
+	row("DeepCopy (populated object)", d, a)
 }
 
 type metaOnly struct{ m any }
