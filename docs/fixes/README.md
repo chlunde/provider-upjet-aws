@@ -48,9 +48,9 @@ Deliberately excluded, with reasons:
 | # | fix | category | severity | size | lives in | status |
 | - | --- | --- | --- | --- | --- | --- |
 | [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | **implemented, verified** — `chlunde/upjet` `fix-movetostatus-copy-before-mutate` @ `9124f35` |
-| [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet (or here) | not started |
+| [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet | **implemented, verified** — `fix-clear-schemafunc-after-materialise` @ `786ec33` |
 | [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | not started |
-| [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | not started |
+| [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | **implemented, narrowed** — `fix-error-on-missing-secret-key` @ `32e9967` |
 | [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | not started |
 | [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | not started |
 | [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | high (latent) | medium | upjet | not started |
@@ -274,6 +274,54 @@ One judgement for a reviewer: `equality.Semantic` treats Quantity `1` and
 `1000m` as equal, so a status field changing only in formatting would be
 suppressed. Semantically identical, but `reflect.DeepEqual` is the stricter
 alternative if maintainers prefer it.
+
+### 02 — clear `SchemaFunc` (upjet)
+
+Implemented and verified. `chlunde/upjet`, branch
+`fix-clear-schemafunc-after-materialise`, commit `786ec33`, on upstream
+`dbfccb4`. Two lines of code plus a comment, and a test.
+
+Verified here rather than on report: replacing the assignment with a no-op makes
+the new test fail on three separate assertions, the last being the SDK's own
+error —
+
+```
+Resource.SchemaFunc was not cleared after its schema was materialized into Resource.Schema
+mutation of Resource.Schema is not visible through Resource.SchemaMap; ...
+Resource.InternalValidate failed: SchemaFunc and Schema should not both be set
+```
+
+`pkg/schema/traverser/traverse.go` is the only other reader of `SchemaFunc`, and
+it consults `Schema` first, so clearing the func cannot affect it. Full upjet
+suite green.
+
+### 04 — missing secret key (upjet) — **narrowed from the original scope**
+
+Implemented as `fix-error-on-missing-secret-key` @ `32e9967`, but **half the fix
+described in `04-missing-secret-key.md` was dropped, deliberately.**
+
+What shipped: `GetSecretValue` returns an error when the named key is absent,
+instead of `(nil, nil)`.
+
+What was dropped: the doc also proposed leaving the parameter *unset* when the
+referenced secret does not exist, rather than substituting `""`. The
+implementation did that, and it was reverted here on review. Four lines below
+that call site, the list-of-selectors branch documents the opposite as
+intentional:
+
+```go
+// If referenced k8s secret is deleted before the MR, we pass empty string for the sensitive
+// field to be able to destroy the resource.
+```
+
+Leaving the parameter unset would risk wedging deletion for a managed resource
+whose secret was removed first — the precise scenario that comment exists for.
+The original analysis proposed that change without reconciling it against the
+adjacent documented decision.
+
+The narrowed patch is also the more merge-likely one: erroring on a key that
+isn't there is unarguable, while reversing a documented design choice invites a
+debate that would sink the whole PR.
 
 ## Suggested order
 
