@@ -14,6 +14,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -72,7 +73,8 @@ func TestTemplateSingleGlobalRateLimiter(t *testing.T) {
 	if got := strings.Count(src, "GlobalRateLimiter:"); got != 2 {
 		t.Errorf("%s: expected exactly two GlobalRateLimiter fields, found %d", path, got)
 	}
-	if got := strings.Count(src, "GlobalRateLimiter:       globalRateLimiter,"); got != 2 {
+	sharedRef := regexp.MustCompile(`GlobalRateLimiter:\s+globalRateLimiter,`)
+	if got := len(sharedRef.FindAllString(src, -1)); got != 2 {
 		t.Errorf("%s: expected both GlobalRateLimiter fields to reference the shared globalRateLimiter variable, found %d such references", path, got)
 	}
 }
