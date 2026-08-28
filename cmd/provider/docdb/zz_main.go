@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/alecthomas/kingpin/v2"
@@ -223,6 +224,19 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	kingpin.FatalIfError(err, "Cannot initialize the cluster provider configuration")
 	namespacedProvider, err := config.GetProviderNamespaced(ctx, fwProvider, sdkProvider, false, *skipDefaultTags)
 	kingpin.FatalIfError(err, "Cannot initialize the namespaced provider configuration")
+
+	// Building the provider configurations unmarshals the embedded Terraform
+	// schema and the registry metadata, which allocates ~15 GiB in total and
+	// leaves the Go heap sized for that peak. The result is a large amount of
+	// collected-but-unreturned heap: after startup the arena holds ~180-255 MiB
+	// of idle spans against ~51 MiB of live data. runtime.GC() does not hand
+	// those spans back, and the background scavenger does not reclaim them on
+	// its own - measured flat over an idle observation window - so a pod pays
+	// for the startup peak for the life of the process. Anonymous memory is
+	// never subtracted from container_memory_working_set_bytes, unlike the
+	// clean, file-backed executable, so this is the part that shows up on the
+	// bill. Release it once, here, where the one-off is by far the largest.
+	debug.FreeOSMemory()
 
 	clusterSetupConfig := &clients.SetupConfig{
 		Logger:            logr,
