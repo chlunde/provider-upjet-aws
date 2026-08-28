@@ -1,5 +1,17 @@
 # Release the startup heap once the provider configuration is built
 
+> # RETRACTED — do not open this PR
+>
+> **The premise below is false.** It rests on the claim that Go's background
+> scavenger does not return the idle heap on its own. It does, unprompted,
+> within ~2.5 minutes idle and ~15 seconds under load. See
+> [the retraction](#retraction-the-runtime-already-does-this) at the end of this
+> file. The branch `fix/release-startup-memory` @ `0dfbe58` is left in place for
+> history only.
+>
+> An explicit `debug.FreeOSMemory()` buys **7–10 MiB and closes a ~2.5-minute
+> window at startup** — not 180–255 MiB.
+
 **The largest measured win in this analysis, and the smallest change.** One
 `debug.FreeOSMemory()` after the provider configurations are built.
 
@@ -121,3 +133,78 @@ already validated both, but "structurally verified" and "compiles" are different
 claims and only one of them has been established here.
 
 **Branch** `fix/release-startup-memory` @ `0dfbe58`.
+
+
+---
+
+## RETRACTION: the runtime already does this
+
+### How the error was made
+
+The evidence for "it does not come back" was an idle sampling of two processes
+that showed anonymous RSS flat over 2 min 20 s. **Both had been started with
+`SCAVENGE_AFTER_STARTUP=1`.** They had already released the idle heap
+explicitly, so they were sitting at the post-scavenge floor with nothing left to
+return. The control had nothing to give back, and its flatness was read as proof
+that the runtime would not act. The correct control — a process that never
+scavenges — was never run.
+
+### What the runtime actually does
+
+A 15-run matrix (`claude/steady-state-scavenge` @ `a9022f7`, raw logs in
+`hack/memprofile/steadystate/results/`), `WORKLOAD=idle`, no explicit call:
+
+| t | no limit rep1 | no limit rep2 | `=300MiB` rep1 | `=300MiB` rep2 |
+| --- | ---: | ---: | ---: | ---: |
+| 0s | 366.3 | 369.7 | 283.1 | 282.6 |
+| 15s–2m0s | 158.7 flat | 277.3 flat | 163.3 flat | 123.1 flat |
+| **2m30s** | **121.3** | **122.0** | **113.6** | **111.8** |
+| 2m45s–15m0s | flat | flat | flat | flat |
+
+A first burst inside 15 s, the scavenger **parks**, a second burst completes at
+2m15s–2m30s, then flat for 12.5 minutes.
+
+**The mechanism, confirmed independently** with a minimal program that allocates
+1.6 GiB, drops it, calls `runtime.GC()` and then only waits:
+
+```
+t=0s  → t=2m0s   HeapReleased =    3.2 MiB   NumGC = 10  (pinned)
+t=2m15s          HeapReleased = 1603.2 MiB   NumGC = 11  <- forced GC fires
+```
+
+`HeapReleased` jumps the instant `NumGC` ticks at the forced-GC boundary. The
+scavenger parks when it runs out of work and is re-woken at the end of a GC
+cycle; on a fully idle process the only GC is Go's forced one
+(`forcegcperiod`, 2 minutes).
+
+**Under load it is far faster.** Reconcile traffic with no explicit call takes it
+380.8 → 148.1 MiB **in 15 seconds**, because an active process GCs constantly and
+every GC wakes the scavenger.
+
+### Two further claims falsified
+
+* **`GOMEMLIMIT` does not prevent release.** Under a 300 MiB limit the process
+  parks at 111.8–113.6 idle — *lower* than unconstrained (121.3–122.0). The
+  "scavenger targets the limit rather than minimum footprint" explanation is
+  wrong. What the limit genuinely does is cap the arena (`HeapSys` 299.6 vs
+  375–399) and so lower the *startup* high-water mark. That part stands.
+* **A periodic ticker is pointless.** `SCAVENGE_EVERY=2m` produces a sawtooth:
+  each forced scavenge reaches 117.2 and the workload is back to 144.3 within
+  15 s. A trough nobody observes, not a lower plateau.
+
+### What survives
+
+Only this: a one-shot `FreeOSMemory()` after provider construction would close
+a **~2.5-minute window** during which a just-started pod reports 280–380 MiB
+instead of ~120 MiB, and hold roughly **8 MiB** below where the runtime settles.
+That may matter to a VPA or a scrape that samples a fresh pod, and nothing else.
+If it is ever proposed it must be described that way.
+
+### And the original question is open again
+
+The proxy workload has **no growing live set**, so the ~150 MiB plateau shows
+that *startup garbage does not persist* — it does **not** explain a real pod
+sitting at ~300 MB. The unmodelled components are where to look next:
+controller-runtime's informer cache (which grows with MR count), client-go, the
+workqueue, the AWS SDK request/response cycle, and per-`Connect` AWS client
+construction.
