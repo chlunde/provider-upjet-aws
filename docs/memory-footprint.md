@@ -240,9 +240,15 @@ change in the `upbound/terraform-provider-aws` fork.
 
 ### 3. Stop building 1,029 resource configurations to use 104
 
-Now measured as the largest win after the binary itself: this work is **24 of
-the 25 seconds of startup**, and the arena it grows to absorb its own garbage is
-**386 MB of anonymous RSS** — the half a pod's working-set metric counts in full.
+> **Corrected after measurement — see [the correction below](#correction-filtering-the-resource-set-is-a-startup-win-not-a-memory-win).**
+> The startup half of this claim holds and is large. The memory half does not:
+> filtering buys ~47 MiB of anonymous RSS unconstrained, and **nothing at all**
+> under `GOMEMLIMIT=300MiB`. The arena comes from whole-file parsing that no
+> include list reaches, not from the 925 skipped resources.
+
+This work is **24 of the 25 seconds of startup**, and it runs alongside an arena
+of **386 MB of anonymous RSS** — the half a pod's working-set metric counts in
+full.
 
 * Filter `config.Provider.Resources` to the family. The mapping is already
   statically known in-repo — `config/groups.go` plus upjet's default
@@ -335,3 +341,97 @@ which is the best of these trade-offs and needs no code change at all. It is a
 mitigation rather than a fix — the garbage is still produced — but it is the one
 lever available today, and it acts on the half of RSS that a pod's working-set
 metric counts in full.
+
+
+---
+
+## Correction: filtering the resource set is a startup win, not a memory win
+
+Everything above about *where* the memory is remains measured and correct. The
+**inference** in §3 — that the arena is grown by building 1,029 resource
+configurations, so building 104 would shrink it — is **wrong**, and was refuted
+by direct measurement.
+
+### The experiment
+
+`UPJET_FAMILY_FILTER=<short group>` (branch `claude/family-filter-measurement`)
+filters the three include lists before they reach `config.NewProvider`. That is
+the correct cut point: upjet's include-list `continue`
+(`pkg/config/provider.go:429`) runs **before**
+`terraformResource.Schema = terraformResource.SchemaFunc()` at `:443`, so
+filtered resources genuinely skip materialisation. One binary serves both arms,
+so this isolates the runtime effect with no change in link shape. The 104 names
+kept are byte-identical to the 104 an unfiltered run assigns `ShortGroup == ec2`.
+
+### Results
+
+Unconstrained (`GOGC`/`GOMEMLIMIT` unset), n=3 baseline / n=4 filtered:
+
+| metric | baseline (1,029) | ec2 only (104) | delta |
+| --- | --- | --- | --- |
+| **anonymous RSS** | 376.0–381.1 MiB | 327.7–333.8 MiB | **−47 MiB (−12.5%)** |
+| live heap | 51.5 MiB | 32.5–32.6 MiB | −19 MiB |
+| startup path | 23.94–24.27 s | 4.06–4.09 s | **−20.1 s (−83%)** |
+| peak RSS | 1041–1043 MiB | 977–986 MiB | −60 MiB |
+| `HeapIdle` | 290.0–295.6 MiB | 280.0–299.7 MiB | **~0** |
+| `HeapInuse` | 95.9–97.5 MiB | 45.8–47.9 MiB | −50 MiB |
+| `TotalAlloc` | ~15,540 MiB | ~3,018 MiB | −80.6% |
+
+Under `GOMEMLIMIT=300MiB` — independently re-run and reproduced:
+
+| | baseline | ec2 only |
+| --- | --- | --- |
+| anonymous RSS | 290,460 kB = **283.7 MiB** | 288,556 kB = **281.8 MiB** |
+| startup path | 28.45 s | **4.30 s** |
+| `HeapInuse` | 90.9 MiB | 45.6 MiB |
+| `HeapIdle` | 208.6 MiB | **246.0 MiB** |
+
+**−1.9 MiB. Inside noise.**
+
+### Why
+
+`HeapIdle` does not fall — under `GOMEMLIMIT` it *rises*, 208.6 → 246.0 MiB,
+while `HeapInuse` halves. **The arena is not smaller, it is emptier.** The GC
+heap goal is set by peak reachable set, and that peak is dominated by work the
+include list never reaches:
+
+* `PHASES_ONLY` — only the include-list-independent parses (`tfjson` unmarshal of
+  the 18.1 MB `schema.json` over 1,683 resources, `GetV2ResourceMap`, the
+  `provider-metadata.yaml` parse over 1,676) — retains **129.9 MiB live**,
+  `HeapSys` 207.6–211.6 MiB, anonymous RSS **222.1–222.4 MiB**.
+* `STOP_AFTER_STEP=4` — schemes plus `xpprovider.GetProvider`, no config build at
+  all — anonymous RSS **50.1–53.4 MiB**.
+* In the *filtered* run itself, which only ever builds 104 configs,
+  `GetV2ResourceMap` alone adds **+49.0 MiB** live and the registry metadata parse
+  another **+5.6**, reaching 135.8 MiB.
+
+`config.NewProvider` does all of that unconditionally, once per scope, before any
+include list is consulted.
+
+*Caveat, stated honestly:* `PHASES_ONLY` holds the `tfjson` tree live at the end
+where `NewProvider` may drop it mid-function, so ~222 MiB is the cost of
+doing-and-holding the parse, an upper bound rather than a proven floor.
+
+### Where the −11.4 MiB figure came from, and why it misled
+
+The `-11.4 MiB` in §3 is an in-process simulation that drops entries from an
+**already-built** map and takes 1 ms. It never avoided the materialisation or the
+parse. It understated the live-heap effect (real: −19 MiB) while implying the
+arena would follow it down, which it does not. **Every simulated delta in this
+document measures what is *reachable*, not what the run *allocated*** — treat
+them accordingly.
+
+### What this means
+
+* **Do not propose "filter the resource set" to upjet as a memory fix.** It buys
+  −12.5% unconstrained and nothing under the `GOMEMLIMIT` this document already
+  recommends. The two mitigations do not compose; the limit binds first.
+* **Do propose the startup win.** 24.2 s → 4.1 s, ~6× faster time-to-ready, from a
+  downstream change needing no upjet modification at all.
+* **The memory proposal worth making to upjet is a different one:** let
+  `NewProvider` avoid materialising the whole `schema.json` and
+  `provider-metadata.yaml` object graphs for a non-generation provider, and share
+  one parse between the cluster-scoped and namespaced builds. Filtering the
+  include list is a *precondition* — you cannot skip parsing what you still need —
+  but is not itself the win. **That case is unmeasured**; it needs an upjet fork,
+  and no number should be quoted for it until someone runs it.
