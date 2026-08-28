@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
@@ -18,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	stscredstypesv2 "github.com/aws/aws-sdk-go-v2/service/sts/types"
+	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/middleware"
 	"github.com/go-ini/ini"
 	"github.com/pkg/errors"
@@ -54,6 +57,13 @@ const (
 
 	upboundProviderIdentityTokenFile = "/var/run/secrets/upbound.io/provider/token"
 )
+
+// assumeRoleSessionDuration is the session duration requested for every role in
+// spec.assumeRoleChain. One hour is the longest session AWS grants a role
+// assumed from another role's session (role chaining), and it is also upjet's
+// defaultAsyncTimeout -- the deadline of the detached goroutine that runs every
+// Create, Update and Delete in this provider.
+const assumeRoleSessionDuration = 1 * time.Hour
 
 // GlobalRegion is the region name used for AWS services that do not have a notion
 // of region.
@@ -294,10 +304,9 @@ func UseProviderSecret(ctx context.Context, data []byte, profile, region string)
 func GetRoleChainConfig(ctx context.Context, pcs *v1beta1.ProviderConfigSpec, cfg *aws.Config) (*aws.Config, error) {
 	pCfg := cfg
 	for _, aro := range pcs.AssumeRoleChain {
-		stsAssume := stscreds.NewAssumeRoleProvider(
+		stsAssume := NewAssumeRoleProvider(
 			sts.NewFromConfig(*pCfg, stsRegionOrDefault(cfg.Region)), //nolint:contextcheck
-			aws.ToString(aro.RoleARN),
-			SetAssumeRoleOptions(aro),
+			aro,
 		)
 		cfgWithAssumeRole, err := config.LoadDefaultConfig(
 			ctx,
@@ -311,6 +320,88 @@ func GetRoleChainConfig(ctx context.Context, pcs *v1beta1.ProviderConfigSpec, cf
 		pCfg = &cfgWithAssumeRole
 	}
 	return pCfg, nil
+}
+
+// NewAssumeRoleProvider returns a credentials provider that assumes the role
+// described by aro, asking for a session that lasts assumeRoleSessionDuration
+// rather than the AWS SDK default of stscreds.DefaultDuration (15 minutes).
+//
+// The credentials retrieved here are eventually copied into the Terraform AWS
+// client as static strings (see configureNoForkAWSClient), which has no way of
+// refreshing them. That client is then handed to upjet's asynchronous
+// Create/Update/Delete, which detach from the reconcile and run for up to
+// defaultAsyncTimeout -- one hour. A 15 minute session therefore expires while
+// a slow create (RDS, EKS, OpenSearch, CloudFront) is still running, and the
+// operation fails with ExpiredToken after the external resource already
+// exists. One hour is the longest session AWS grants a chained role, so it is
+// as much of that window as we can cover -- the session still starts when the
+// credentials are retrieved rather than when the operation does, so an
+// operation that runs for the full hour can still outlive it.
+//
+// A role whose MaxSessionDuration is below the requested duration rejects the
+// AssumeRole call outright, so the returned provider falls back to the SDK
+// default duration for such roles; see sessionDurationFallbackProvider.
+func NewAssumeRoleProvider(client stscreds.AssumeRoleAPIClient, aro v1beta1.AssumeRoleOptions) aws.CredentialsProvider {
+	return &sessionDurationFallbackProvider{
+		preferred: stscreds.NewAssumeRoleProvider(client, aws.ToString(aro.RoleARN), SetAssumeRoleOptions(aro), func(opt *stscreds.AssumeRoleOptions) {
+			opt.Duration = assumeRoleSessionDuration
+		}),
+		// stscreds.AssumeRoleProvider mutates its own options on the first
+		// Retrieve, so the fallback needs a provider of its own rather than a
+		// second call into the preferred one.
+		fallback: stscreds.NewAssumeRoleProvider(client, aws.ToString(aro.RoleARN), SetAssumeRoleOptions(aro)),
+	}
+}
+
+// sessionDurationFallbackProvider retrieves from preferred, and permanently
+// switches to fallback once AWS has told us the requested session duration
+// exceeds the role's MaxSessionDuration. Any other error is returned as is.
+type sessionDurationFallbackProvider struct {
+	preferred *stscreds.AssumeRoleProvider
+	fallback  *stscreds.AssumeRoleProvider
+
+	// tooLong is set once the preferred provider has been rejected for asking
+	// for too long a session. It only ever goes from false to true, but the
+	// provider is shared by every reconcile using this ProviderConfig, so the
+	// access is synchronized.
+	tooLong atomic.Bool
+}
+
+// ProviderSources implements aws.CredentialProviderSource, which the AWS SDK
+// uses to report where credentials came from. Without it the wrapper would hide
+// the assume role provider underneath from aws.CredentialsCache.
+func (p *sessionDurationFallbackProvider) ProviderSources() []aws.CredentialSource {
+	if p.tooLong.Load() {
+		return p.fallback.ProviderSources()
+	}
+	return p.preferred.ProviderSources()
+}
+
+func (p *sessionDurationFallbackProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	if p.tooLong.Load() {
+		return p.fallback.Retrieve(ctx)
+	}
+	creds, err := p.preferred.Retrieve(ctx)
+	if err == nil || !isSessionDurationTooLong(err) {
+		return creds, err
+	}
+	p.tooLong.Store(true)
+	return p.fallback.Retrieve(ctx)
+}
+
+// isSessionDurationTooLong reports whether err is the STS rejection of a
+// DurationSeconds larger than the role's MaxSessionDuration. STS does not model
+// this as a typed error, it arrives as a generic ValidationError:
+//
+//	ValidationError: The requested DurationSeconds exceeds the MaxSessionDuration
+//	set for this role.
+func isSessionDurationTooLong(err error) bool {
+	var apiErr smithy.APIError
+	if !errors.As(err, &apiErr) || apiErr.ErrorCode() != "ValidationError" {
+		return false
+	}
+	msg := apiErr.ErrorMessage()
+	return strings.Contains(msg, "DurationSeconds") || strings.Contains(msg, "MaxSessionDuration")
 }
 
 // GetAssumeRoleWithWebIdentityConfig returns an aws.Config capable of doing
