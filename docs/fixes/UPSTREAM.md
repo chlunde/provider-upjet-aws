@@ -6,7 +6,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Handover: what to propose, where, and in what order
 
-Eighteen branches across three forks. No pull request has been opened anywhere.
+Nineteen branches across three forks. No pull request has been opened anywhere.
 Full write-up for each is the numbered file in this directory; this page is just
 the shape of the thing.
 
@@ -51,6 +51,7 @@ fork, which is why every upjet branch here uses dashes.
 
 | fix | branch @ sha | what | severity |
 | --- | --- | --- | --- |
+| [23](23-release-startup-heap.md) | `fix/release-startup-memory` @ `0dfbe58` | Release 180–255 MiB of idle heap left over from startup | **waste/cost, high** |
 | [15](15-wafv2-rule-group-external-name.md) | `fix-wafv2-rule-group-association-external-name` @ `11facaf` | `WebACLRuleGroupAssociation` never records its external name and re-creates on every retry | **data loss, critical** |
 | [19](19-external-name-template-defects.md) | `fix-external-name-template-defects` @ `453072d` | Two malformed external-name templates + a schema-backed guard for the class | correctness, high |
 | [06](06-dynamic-endpoint-ignored.md) | `fix/dynamic-endpoint-for-tf-client` @ `29aa0a4` | `endpoint.url.type: Dynamic` silently ignored; all CRUD goes to public AWS | correctness, high |
