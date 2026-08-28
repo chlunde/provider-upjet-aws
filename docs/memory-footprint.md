@@ -640,3 +640,73 @@ ticker. A few lines in the generated `main`, nothing needed from upjet or the
 terraform-provider-aws fork.
 
 **Harness** `claude/family-filter-measurement` @ `f40d959` (`SCAVENGE=1`).
+
+### Steady state: the background scavenger does not do this for you
+
+The obvious objection to the finding above is that Go's background scavenger
+would return that memory on its own given time, making an explicit call
+unnecessary. **Measured, and it does not.**
+
+Two processes, both having already scavenged once after startup, sampled from
+`/proc/<pid>/smaps_rollup` every 20 s while idle:
+
+| t | no `GOMEMLIMIT` | `GOMEMLIMIT=300MiB` |
+| --- | ---: | ---: |
+| 21:00:03 | 153,132 kB | 146,472 kB |
+| 21:00:43 | 153,156 kB | 146,480 kB |
+| 21:01:23 | 153,172 kB | 146,492 kB |
+| 21:02:03 | 153,192 kB | 146,508 kB |
+| 21:02:23 | 153,204 kB | 146,516 kB |
+
+Over **2 min 20 s** of idling the no-limit process moved **+72 kB** and the
+limited one **+44 kB**. That is drift, not reclamation. Neither configuration
+returns anything unprompted.
+
+Stated precisely: *does not reclaim within ~2.5 minutes of idling*. Go's
+scavenger runs on roughly a 1% CPU budget and is slow by design, so this is not
+proof it would never act — but ~40 MiB should be well inside that window, and
+nothing moved.
+
+No memory-pressure confound: 16 GB total, 15 GB available, 9.8 GB in
+buff/cache, so the kernel was never pushed to reclaim on the processes' behalf.
+
+**Second finding, from the same samples.** Both had scavenged at startup and sat
+at **143–150 MiB** — about 40 MiB above the 104–112 MiB post-scavenge floor, but
+**flat**, not climbing back toward the 283–367 MiB startup high-water mark. Work
+after the scavenge re-grows a bounded amount and then stops.
+
+### Caveat on the harness, and on concurrency
+
+`hack/memprofile/steadystate` (branch `claude/steady-state-scavenge` @ `1ddcefa`)
+deliberately **never calls `runtime.GC()` while sampling** — every other harness
+here reports after a forced collection, which is right when attributing live heap
+to a step and wrong when the question is what the runtime does unprompted.
+
+`WORKLOAD=reconcile` is **a proxy and is documented as one**: it replays the
+pure-CPU parts of Connect+Observe in a loop. With no cluster and no AWS account
+it models none of the AWS SDK request cycle, controller-runtime's informer cache,
+client-go, or the workqueue. It is a lower bound on per-reconcile churn with no
+growing live set.
+
+The two arms above ran **concurrently**, which makes the binary's file-backed
+pages `Shared_Clean` between them — `Private_Clean` reads 10–13 MB instead of the
+~690 MB seen single-process. **`Anonymous` is unaffected** (anonymous pages are
+always private) and is the column that matters, but no `RSS` or `Private_Clean`
+figure from those runs is comparable with the single-process measurements above.
+
+### Recommended fix shape
+
+On this evidence: **a one-shot `debug.FreeOSMemory()` after provider
+construction**, in the generated `main`. It captures the large one-off — the
+180–255 MiB of startup garbage — durably, because nothing re-grows toward that
+mark and the background scavenger will not return it on its own.
+
+A slow ticker would additionally recover the ~40 MiB that post-startup work
+re-establishes. On the idle evidence that is a refinement, not a necessity, and
+it carries a real cost: `FreeOSMemory` forces a full stop-the-world GC (58 ms
+measured at startup scale), so a ticker trades latency spikes for memory. Ship
+the one-shot first.
+
+Do **not** rely on `GOMEMLIMIT` for this. It does not cause release — it makes
+the scavenger target the limit rather than minimum footprint, and the idle
+samples show the limited arm reclaiming no better than the unlimited one.
