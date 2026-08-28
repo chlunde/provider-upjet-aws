@@ -1,0 +1,30 @@
+=== steadystate: WORKLOAD=reconcile DURATION=1m0s INTERVAL=15s SCAVENGE_AFTER_STARTUP=true SCAVENGE_EVERY=0s QPS=2
+=== GOGC="" GOMEMLIMIT="" GOMAXPROCS=4 NumCPU=4 go=go1.26.7
+2026/08/28 19:47:54 Creating Terraform AWS Provider (SDKv2-style)...
+2026/08/28 19:47:54 Initializing Terraform AWS Provider (SDKv2-style)...
+2026/08/28 19:47:54 Creating Terraform AWS Provider (Framework-style)...
+2026/08/28 19:47:54 Initializing Terraform AWS Provider (Framework-style)...
+=== startup path complete in 24.372s: 1029 cluster resources, 1029 namespaced, 8488 scheme GVKs
+
+startup+GC (t+24.401s)
+   MemStats: HeapAlloc=51.6 HeapSys=371.6 HeapIdle=275.5 HeapInuse=96.0 HeapReleased=8.4 Sys=388.8 TotalAlloc=15571.8 NumGC=173
+   RSS=1055.8 MiB  PeakRSS(VmHWM)=1055.8 MiB
+   smaps: Rss: 1081148 kB | Pss: 739385 kB | Private_Clean: 11356 kB | Private_Dirty: 387560 kB | Anonymous: 387560 kB
+=== debug.FreeOSMemory() took 53ms
+
+post-FreeOSMemory (t+24.463s)
+   MemStats: HeapAlloc=51.5 HeapSys=371.6 HeapIdle=275.8 HeapInuse=95.8 HeapReleased=275.3 Sys=388.8 TotalAlloc=15571.8 NumGC=174
+   RSS=789.0 MiB  PeakRSS(VmHWM)=1055.5 MiB
+   smaps: Rss: 807896 kB | Pss: 466133 kB | Private_Clean: 11356 kB | Private_Dirty: 114308 kB | Anonymous: 114308 kB
+=== workload: InstanceDiff panics offline (value is not an object); diff step disabled
+=== workload: 2 full probes, 5 schema-rebuild probes, diff step enabled=false
+=== observation window: 1m0s, sampling every 15s, workload=reconcile
+t        label                   Anon       Rss PrivDirty | HeapAlloc   HeapSys  HeapIdle HeapInuse   HeapRel       Sys  TotalAlloc  NumGC | reconciles
+0s       -                      112.8     790.8     112.8 |      53.5     371.6     274.4      97.2     274.1     388.8     15573.8    174 |          0
+15s      -                      123.2     801.5     123.2 |      75.1     371.6     263.6     107.9     263.6     388.8     15595.5    174 |         31
+30s      -                      134.6     813.0     134.6 |      60.9     371.6     271.8      99.8     252.3     388.8     15616.0    175 |         61
+45s      -                      134.7     813.2     134.7 |      81.4     371.6     257.7     113.9     252.3     388.8     15636.5    175 |         91
+1m0s     -                      137.2     815.7     137.2 |      65.6     371.6     269.5     102.1     249.7     388.8     15657.1    176 |        121
+=== window done: 121 workload iterations in 1m0s
+=== final debug.FreeOSMemory() took 21ms
+1m0s     final-scavenge         111.8     790.3     111.8 |      51.7     371.6     275.6      96.0     275.2     388.8     15657.1    177 |        121

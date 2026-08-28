@@ -1,0 +1,22 @@
+=== steadystate: WORKLOAD=idle DURATION=1m0s INTERVAL=15s SCAVENGE_AFTER_STARTUP=false SCAVENGE_EVERY=0s QPS=0
+=== GOGC="" GOMEMLIMIT="" GOMAXPROCS=4 NumCPU=4 go=go1.26.7
+2026/08/28 19:41:42 Creating Terraform AWS Provider (SDKv2-style)...
+2026/08/28 19:41:42 Initializing Terraform AWS Provider (SDKv2-style)...
+2026/08/28 19:41:42 Creating Terraform AWS Provider (Framework-style)...
+2026/08/28 19:41:42 Initializing Terraform AWS Provider (Framework-style)...
+=== startup path complete in 24.247s: 1029 cluster resources, 1029 namespaced, 8488 scheme GVKs
+
+startup+GC (t+24.28s)
+   MemStats: HeapAlloc=51.6 HeapSys=379.6 HeapIdle=282.2 HeapInuse=97.3 HeapReleased=21.7 Sys=396.6 TotalAlloc=15564.3 NumGC=172
+   RSS=1041.9 MiB  PeakRSS(VmHWM)=1046.9 MiB
+   smaps: Rss: 1065988 kB | Pss: 1064638 kB | Private_Clean: 683196 kB | Private_Dirty: 381164 kB | Anonymous: 381164 kB
+=== observation window: 1m0s, sampling every 15s, workload=idle
+t        label                   Anon       Rss PrivDirty | HeapAlloc   HeapSys  HeapIdle HeapInuse   HeapRel       Sys  TotalAlloc  NumGC | reconciles
+0s       -                      372.2    1041.0     372.2 |      51.6     379.6     282.2      97.3      22.7     396.6     15564.4    172 |          0
+15s      -                      309.4     978.2     309.4 |      51.6     379.6     282.2      97.4      85.5     396.6     15564.4    172 |          0
+30s      -                      309.4     978.2     309.4 |      51.6     379.6     282.2      97.4      85.5     396.6     15564.4    172 |          0
+45s      -                      309.4     978.2     309.4 |      51.6     379.6     282.2      97.4      85.5     396.6     15564.4    172 |          0
+1m0s     -                      309.4     978.2     309.4 |      51.6     379.6     282.2      97.4      85.5     396.6     15564.4    172 |          0
+=== window done: 0 workload iterations in 1m0s
+=== final debug.FreeOSMemory() took 52ms
+1m0s     final-scavenge         112.7     781.5     112.7 |      51.5     379.6     282.4      97.2     282.2     396.6     15564.4    173 |          0
