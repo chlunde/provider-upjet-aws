@@ -13,12 +13,13 @@ change, how to test it, a ready-to-paste GitHub issue and a branch name.
 
 Read this before treating any of it as ready to merge.
 
-* **One fix has been implemented and verified.** `dropCodegenOnlyMetadata`
-  (commit `a8fc8b5f5`), measured at &minus;17.2 MiB of live heap, confirmed by
-  rebuilding with it compiled in. It is not in this directory because it is
-  already done.
-* **Everything else in this directory is analysis, not code.** No patch has been
-  written or run for any of them.
+* **Most of these now have branches.** The `status` column says which. Anything
+  marked *implemented* has a pushed branch with tests; anything marked *not
+  started* is still analysis only. `dropCodegenOnlyMetadata` (commit
+  `a8fc8b5f5`, &minus;17.2 MiB of live heap) has no file here because it landed
+  before this directory existed.
+* **No pull requests have been opened.** Every branch is pushed to a fork and
+  waiting on a human to decide whether and where to propose it.
 * **Verification is uneven.** Each file states its own evidence level:
   * **measured** — reproduced locally with the harness in `hack/memprofile`.
   * **read** — established by reading the source, not executed.
@@ -61,6 +62,33 @@ Deliberately excluded, with reasons:
 | [12](12-caller-identity-cache.md) | Data race and STS-under-lock in the identity cache | correctness | medium | **small** | this repo | **ready, one caveat** — `fix/identity-cache-race-and-lock-scope` @ `efb86ceee` |
 | [13](13-double-rate-limiter.md) | `--max-reconcile-rate` delivers double what it says | correctness | medium | **1 line** | this repo | **reviewed, ready** — `fix/single-global-rate-limiter` @ `2de61d751` |
 | 14 | Suppress the no-op status update on every reconcile | waste / cost | high (cost) | small | crossplane-runtime | **implemented, verified** — `fix/suppress-noop-status-update` @ `35d1fdc` |
+| [15](15-wafv2-rule-group-external-name.md) | `WebACLRuleGroupAssociation` never records its external name and leaks associations | **data loss** | **critical** | small | this repo | **implemented, verified** — `fix-wafv2-rule-group-association-external-name` @ `de1ad72` |
+| [16](16-tagger-noop-spec-update.md) | The `Tagger` initializer writes the spec on every reconcile | waste / cost | high (cost) | small | upjet | **implemented, verified** — `chlunde/upjet` `fix-tagger-skip-noop-spec-update` @ `43f8c2d` |
+
+## Confirmed in round-2 triage, no branch yet
+
+Verified by reading the source (see [lead-triage-round2.md](../lead-triage-round2.md)
+for the full verdicts and the three that were refuted). Ordered by what I would
+do next. None of these has a patch.
+
+| lead | what | category | size | lives in |
+| --- | --- | --- | --- | --- |
+| R8 | Trailing `/` in the AppStream user-stack-association ID template, so Read and Delete parse `stack/` (`config/externalname.go:488`) | correctness | **1 char** | this repo |
+| R7 | `{{ .parameeters.target }}` typo silently drops `target` from `IdentifierFields` (`config/externalname.go:1894`) — and a codegen assertion that every `.parameters.*` names a real schema attribute would close the whole class | correctness | **1 char + a guard** | this repo |
+| R6 | `Update` returns no connection details; a rotated password is not republished until the next Observe | data loss | small | upjet |
+| R3 | The `s`-suffix trim mangles connection-secret keys for map/list sensitive attributes — `connection_propertie`, `airflow_configuration_option` (`pkg/resource/sensitive.go:473`) | correctness | small but **API-breaking** | upjet |
+| R11 | Two unasserted `Conversions[1:]` index assumptions, including `config/cluster/elasticache/config.go:114` | maintainability | small | this repo |
+| R16, R17 | A literal `%v` in an `errors.New`, and a doubled error prefix in the replace refusal (`external_tfpluginfw.go:475,882`) | observability | **trivial** | upjet |
+| R12, R14 | Whole-path camel→snake in `conditionalFilter`; `ReplaceAll(e,"0","*")` corrupts inject-key paths | correctness (latent) | small | upjet |
+| R10 | A Version-only SNS/SQS policy change is silently suppressed — deliberate, and no clean fix exists | correctness | — | this repo |
+| R20 | ProviderConfig inconsistency affecting `sts:GetCallerIdentity` only | correctness | small | this repo |
+
+R1 became fix 16 and R9 became fix 15. R2 is not a fix but a correction to fix
+11's cost accounting, recorded in the audit-cost note below.
+
+Forward-looking work that is not a defect fix lives in [ideas.md](../ideas.md) —
+notably surfacing the Terraform diff, which is computed on every Observe and
+discarded, while `ExternalUpdate.AdditionalDetails` is used nowhere in upjet.
 
 ## Progress
 
