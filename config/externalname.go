@@ -3775,11 +3775,34 @@ func dsqlClusterPeering() config.ExternalName {
 	return e
 }
 
+// singletonBlock returns the nested block stored under key in tfstate.
+//
+// GetExternalNameFn is called with the state map in two different shapes:
+// during Observe the singleton-list-to-embedded-object conversion has already
+// run, so a single-element nested block is a map[string]any; during Create the
+// external name is computed from the raw Terraform state, where the same block
+// is still a []any holding one map. Accept both, and return nil for anything
+// else (missing key, empty list, non-map element).
+func singletonBlock(tfstate map[string]any, key string) map[string]any {
+	switch v := tfstate[key].(type) {
+	case map[string]any:
+		return v
+	case []any:
+		if len(v) == 0 {
+			return nil
+		}
+		m, _ := v[0].(map[string]any)
+		return m
+	default:
+		return nil
+	}
+}
+
 // customRuleGroupIdentifier returns the ARN from a rule_group_reference block,
 // or an empty string if none is found.
 func customRuleGroupIdentifier(tfstate map[string]any) string {
-	rgr, ok := tfstate["rule_group_reference"].(map[string]interface{})
-	if !ok || rgr == nil {
+	rgr := singletonBlock(tfstate, "rule_group_reference")
+	if rgr == nil {
 		return ""
 	}
 	arn, _ := rgr["arn"].(string)
@@ -3789,8 +3812,8 @@ func customRuleGroupIdentifier(tfstate map[string]any) string {
 // managedRuleGroupIdentifier returns the "vendorName:name[:version]" identifier
 // from a managed_rule_group block, or an empty string if none is found.
 func managedRuleGroupIdentifier(tfstate map[string]any) string {
-	mrg, ok := tfstate["managed_rule_group"].(map[string]interface{})
-	if !ok || mrg == nil {
+	mrg := singletonBlock(tfstate, "managed_rule_group")
+	if mrg == nil {
 		return ""
 	}
 	vendorName, _ := mrg["vendor_name"].(string)
