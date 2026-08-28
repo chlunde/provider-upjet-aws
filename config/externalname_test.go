@@ -5,6 +5,8 @@
 package config
 
 import (
+	"context"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +48,32 @@ func TestEcsTaskDefinitionSetIdentifierArgumentFn(t *testing.T) {
 				t.Errorf("base[\"arn\"] = %q, want %q", got, tc.wantArn)
 			}
 		})
+	}
+}
+
+// TestAppStreamUserStackAssociationID pins the composed Terraform ID against
+// the format the AWS provider itself composes and parses:
+// userStackAssociationCreateResourceID joins user_name, authentication_type and
+// stack_name with "/" and nothing else, and userStackAssociationParseResourceID
+// reads them back with strings.SplitN(id, "/", 3) — so a trailing separator is
+// not ignored, it becomes part of the stack name.
+func TestAppStreamUserStackAssociationID(t *testing.T) {
+	e := TerraformPluginSDKExternalNameConfigs["aws_appstream_user_stack_association"]
+	id, err := e.GetIDFn(context.Background(), "", map[string]any{
+		"user_name":           "user@example.com",
+		"authentication_type": "USERPOOL",
+		"stack_name":          "my-stack",
+	}, nil)
+	if err != nil {
+		t.Fatalf("GetIDFn returned an error: %v", err)
+	}
+	const want = "user@example.com/USERPOOL/my-stack"
+	if id != want {
+		t.Errorf("GetIDFn() = %q, want %q", id, want)
+	}
+	// What the provider's Read and Delete do with the ID.
+	parts := strings.SplitN(id, "/", 3)
+	if len(parts) != 3 || parts[0] != "user@example.com" || parts[1] != "USERPOOL" || parts[2] != "my-stack" {
+		t.Errorf("the provider parses %q as %q, want [user@example.com USERPOOL my-stack]", id, parts)
 	}
 }
