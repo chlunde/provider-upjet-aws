@@ -6,7 +6,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Handover: what to propose, where, and in what order
 
-Seventeen branches across three forks. No pull request has been opened anywhere.
+Eighteen branches across three forks. No pull request has been opened anywhere.
 Full write-up for each is the numbered file in this directory; this page is just
 the shape of the thing.
 
@@ -53,6 +53,7 @@ fork, which is why every upjet branch here uses dashes.
 | --- | --- | --- | --- |
 | [15](15-wafv2-rule-group-external-name.md) | `fix-wafv2-rule-group-association-external-name` @ `11facaf` | `WebACLRuleGroupAssociation` never records its external name and re-creates on every retry | **data loss, critical** |
 | [19](19-external-name-template-defects.md) | `fix-external-name-template-defects` @ `453072d` | Two malformed external-name templates + a schema-backed guard for the class | correctness, high |
+| [06](06-dynamic-endpoint-ignored.md) | `fix/dynamic-endpoint-for-tf-client` @ `29aa0a4` | `endpoint.url.type: Dynamic` silently ignored; all CRUD goes to public AWS | correctness, high |
 | [08](08-credentials-cache-all-sources.md) | `fix/cache-credentials-for-all-sources` @ `d3d6142` | One STS call per reconcile for every non-IRSA source | useless API calls |
 | [21](21-assume-role-session-duration.md) | `fix/refreshing-credentials-for-async-ops` @ `8f2462c` | Assume-role chains get 15-min sessions against a 1-hour async deadline | data loss (mitigation only) |
 | [11](11-scope-secret-informer.md) | `fix/scope-secret-informer` @ `18fa5d0` | Cluster-wide unbounded Secret informer | security + memory |
@@ -110,3 +111,7 @@ fork, which is why every upjet branch here uses dashes.
    orphans.
 3. **Fixes 08 and 21 generally.** The credential paths have unit tests against
    fakes and have never touched STS.
+4. **Fix 06 against localstack.** The correct endpoint map provably reaches the
+   Terraform client; that the pinned provider honours every key for every service
+   at request time is established by reading `internal/conns/config.go`, not by
+   observed traffic.

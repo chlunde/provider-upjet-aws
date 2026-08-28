@@ -95,3 +95,84 @@ Repo: `crossplane-contrib/provider-upjet-aws`
 ## Branch
 
 `fix/dynamic-endpoint-for-tf-client`
+
+---
+
+# Implementation notes
+
+**Branch** `fix/dynamic-endpoint-for-tf-client` @ `29aa0a4`.
+
+The analysis above is correct on premise and mechanism — verified line by line
+during implementation. `grep -rn "URLConfigTypeDynamic\|URL.Dynamic"` over
+`internal/` and `apis/` confirms `SetResolver`
+(`internal/clients/provider_config.go:188-197`) is the *only* place that handles
+`Dynamic`, and it configures the `aws.Config` used for the provider's own STS and
+account-ID calls — not the client that performs CRUD.
+
+## The trap in the proposed solution
+
+The analysis says to reuse "the same per-service URL construction `SetResolver`
+already implements". That construction contains an **exact, case-sensitive**
+`if service == "IAM"` for the global-service case.
+
+`SetResolver` receives AWS SDK service **IDs** (`"IAM"`, `"EC2"`).
+`tfAwsConnsCfg.Endpoints` is keyed by Terraform service **names**, which are
+lowercase — confirmed in the pinned fork: `names/consts_gen.go:129` is
+`IAM = "iam"`, and `internal/conns/config.go:98` looks up `c.Endpoints[names.IAM]`.
+
+So a literal shared helper would have produced
+`https://iam.<region>.<host>` for IAM on the Terraform path — a bogus regional
+endpoint for a global service. The shipped helper lowercases first and compares
+case-insensitively: a no-op for `SetResolver`, correct for the new caller.
+Independently mutation-confirmed — reverting to `service == "IAM"` fails both
+`DynamicTemplatesRegionalAndGlobalServices` and
+`TestDynamicEndpointAgreesWithSDKResolver/iam`.
+
+Note also that `Endpoints` being a fixed map is not incidental: unlike the SDK
+resolver, the Terraform client genuinely cannot template lazily, so populating it
+from `pc.Spec.Endpoint.Services` is required rather than a convenience.
+
+## Unhandled types now fail loudly
+
+`tfEndpointOverrides` switches on `URL.Type`: `Static` unchanged (except that
+`type: Static` with no `static` field is now an error rather than a no-op —
+`SetResolver` already errored on that, so the two were inconsistent); `Dynamic`
+implemented; `Auto` an explicit documented no-op; **anything else, including `""`,
+is an error at setup**.
+
+The `default` branch is unreachable from a real cluster today, because the field
+is a CRD enum — which is exactly what makes it cheap insurance. The next value
+added to that enum fails loudly at setup instead of quietly routing production
+traffic to public AWS for however long it takes someone to notice.
+
+## One fail-open deliberately left alone
+
+An endpoint override listing **no** services is equally fail-open: Terraform gets
+an empty map and all CRUD goes to default endpoints. This was **not** made an
+error, because `SetResolver` ignores `Services` entirely and someone may be
+relying on an endpoint block with no services to redirect only the provider's own
+STS calls. Erroring would break live deployments for a defect separable from this
+one. It logs a warning naming the ProviderConfig instead. Candidate for a
+follow-up.
+
+## Composition
+
+Dry-run merges against both sibling branches touching `internal/clients` are
+clean, and were run rather than eyeballed: `fix/cache-credentials-for-all-sources`
+(`d3d6142`) rewrites the credential/region plumbing above line ~210 of `aws.go`
+and still calls `configureNoForkAWSClient` with the same signature, so the region
+templated into Dynamic URLs is the effective region including the global-group
+substitution; `fix/refreshing-credentials-for-async-ops` (`8f2462c`) touches
+`provider_config.go` only outside `SetResolver`.
+
+## Unverified
+
+* **No e2e.** What is proven offline is that the correct `Endpoints` map now
+  reaches `tfAwsConnsCfg`. What is *not* proven is that the pinned
+  terraform-provider-aws honours every key for every service at request time —
+  `internal/conns/config.go` was read and does consume the map, but that is code
+  reading, not observed traffic. A localstack run with `type: Dynamic` would
+  settle it.
+* `golangci-lint` could not run (built with go1.25 against a repo targeting
+  1.26.7), so the gocyclo reasoning against `min-complexity: 10` is by hand.
+  `gofmt -l` clean, `go vet` passes.

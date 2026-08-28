@@ -53,7 +53,7 @@ Deliberately excluded, with reasons:
 | [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | **partially addressed by fix 21** — the full fix needs a change to the `xpprovider` surface of the terraform-provider-aws fork |
 | [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | **implemented, narrowed** — `fix-error-on-missing-secret-key` @ `32e9967` |
 | [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | not started |
-| [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | not started |
+| [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | **implemented, verified** — `fix/dynamic-endpoint-for-tf-client` @ `29aa0a4`; no e2e |
 | [07](07-fieldpath-camel-snake.md) | camel→snake mangles nested and digit-bearing paths | corruption | medium (latent) | small | upjet | **implemented, verified** — `fix-fieldpath-segmentwise-camel-snake` @ `046b8f2` |
 | [08](08-credentials-cache-all-sources.md) | One STS call per reconcile for every non-IRSA source | useless API calls | high | medium | this repo | **reviewed, ready** — `fix/cache-credentials-for-all-sources` @ `d3d61421a1` |
 | [09](09-cache-aws-client.md) | Rebuilding the AWS client and FW provider every Connect | waste | high | medium | this repo | not started |
