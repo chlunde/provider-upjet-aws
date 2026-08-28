@@ -546,3 +546,74 @@ naming that resource.
   observing before shipping.
 * Webhook and conversion setup for a filtered family, since
   `SetupWebhookWithManager_<family>` runs on a different path from `Setup_<family>`.
+
+---
+
+## The largest win, and it was missed for most of this investigation
+
+**~180–255 MiB of the anonymous footprint is idle heap the runtime is holding
+but not using, and `debug.FreeOSMemory()` returns it in 58 ms.**
+
+Every other figure in this document was taken after `runtime.GC()` only. `GC`
+collects; it does not hand idle spans back to the OS. The counters said so all
+along and nobody read them: in the `GOMEMLIMIT=300MiB` baseline,
+`HeapIdle` 208.6 MiB against `HeapReleased` 28.2 MiB is **180.4 MiB of
+collected-but-resident heap**, with only 51.5 MiB live.
+
+### Measured
+
+`SCAVENGE=1` on the startup harness, immediately after the startup path:
+
+| | anonymous before | anonymous after | drop |
+| --- | --- | --- | --- |
+| no `GOMEMLIMIT` | 376,424 kB = **367.6 MiB** | 114,732 kB = **112.0 MiB** | **−255.6 MiB** |
+| `GOMEMLIMIT=300MiB` | 289,284 kB = **282.5 MiB** | 106,160 kB = **103.7 MiB** | **−178.8 MiB** |
+
+`HeapReleased` 25.5 → 282.8 MiB (unconstrained) and 30.2 → 209.3 MiB (limited).
+`HeapAlloc` and `HeapInuse` are **unchanged** in both — nothing live is touched.
+Total RSS 973.6 → 794.6 MiB; the remainder is the clean, file-backed executable.
+
+**The release is real, not bookkeeping.** `Private_Dirty`/`Anonymous` falls by the
+same amount `HeapReleased` gains, i.e. the kernel actually took the pages
+(`MADV_DONTNEED`). This was checked specifically because a counter moving is not
+the same as memory being returned.
+
+Both configurations converge on ~104–112 MiB — which is `HeapInuse` (90–97) plus
+non-heap `Sys` (~16). That is the floor for this architecture without reducing
+live data or span fragmentation: `HeapAlloc` is 51.5 MiB against `HeapInuse` of
+90–97, so ~40 MiB is fragmentation.
+
+### `GOMEMLIMIT=300MiB` is likely *causing* the observed 300 MB, not mitigating it
+
+Earlier in this document the 386 → 288 MB effect of `GOMEMLIMIT` is reported as a
+win. On this evidence that reading is wrong. When a memory limit is set, Go's
+scavenger targets **the limit**, not minimum footprint — it has no reason to
+return anything while the process is under 300 MiB. That is a good explanation
+for why a real pod parks near 300 MB in steady state and never comes down.
+
+### What this does and does not change
+
+* **Peak RSS is unchanged** (977.9 MiB). The parse still spikes, so a pod's memory
+  *limit* must still cover it and startup OOM risk does not move. Scavenging
+  returns the high-water mark afterwards; avoiding the parse means never taking
+  it. The two compose.
+* **The startup win (24 s → 4 s) is untouched** and independent.
+* **The `elbv2` panic still gates family filtering**; this is unrelated to it.
+
+### The open question that decides the fix
+
+**Every number here, including these, is from the instant after startup.** A pod
+reporting 3xx MB has been reconciling for hours. If steady-state reconciliation
+re-establishes a similar high-water mark within minutes, a one-shot
+`FreeOSMemory()` buys nothing durable and the answer becomes a periodic scavenge,
+or `GOGC`/`GOMEMLIMIT` tuning, or both. **This is not yet measured** — it needs
+the reconcile harness rather than the startup one, and it is the next thing to
+run.
+
+The likely shape of the fix, pending that: stop telling the runtime it may keep
+300 MiB, and either call `debug.FreeOSMemory()` once after provider construction
+— where the startup garbage is by far the largest one-off — or run it on a slow
+ticker. A few lines in the generated `main`, nothing needed from upjet or the
+terraform-provider-aws fork.
+
+**Harness** `claude/family-filter-measurement` @ `f40d959` (`SCAVENGE=1`).
