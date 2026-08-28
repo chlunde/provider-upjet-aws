@@ -102,6 +102,29 @@ before doing any work:
 Scoping the API packages to a single family is worth about **103 MiB of RSS**
 (142.7 → 39.8) on its own, and that is before considering the controllers.
 
+> **The `binary` column is UNSTRIPPED and overstates the shipped artifact by
+> roughly 28%.** These were built with plain `go build`; the release build
+> strips, because `build/makelib/common.mk:71` sets `DEBUG ?= 0` and
+> `build/makelib/golang.mk:50` adds `-s -w` when it is. Measured on a binary of
+> this shape: 1,560 MB unstripped, of which **429.9 MiB is strippable**
+> (`.strtab` 169.6, `.debug_info` 91.9, `.debug_line` 67.4, `.debug_loclists`
+> 43.3, `.symtab` 31.0, `.debug_rnglists` 15.9) — so ~1,060 MB ships.
+>
+> **The `loadable image` and both `RSS` columns are unaffected by stripping**, and
+> every RSS conclusion here stands: DWARF and the symbol table are non-`ALLOC`
+> sections, absent from every `PT_LOAD` segment, so they are never mapped and
+> never resident. Confirmed directly — total `PT_LOAD` memsz is 1,090.7 MiB
+> against a 1,488 MiB file.
+>
+> Quote the stripped figure for image size; quote these columns for memory. The
+> `go tool nm -size` analysis below is likewise unaffected — it reads `.symtab`
+> from an unstripped build and measures code volume, which is what the
+> per-service arithmetic needs.
+>
+> `Private_Clean` is demand-paging dependent and varies run to run (692 MB here,
+> 686–689 MiB in later runs on a differently-built harness); that is page-touch
+> variation, not a discrepancy.
+
 ### What is in the binary
 
 Symbol sizes from `go tool nm -size`:
