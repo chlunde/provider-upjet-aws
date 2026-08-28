@@ -222,6 +222,23 @@ matters: a bounded TTL cache in `internal/clients`, keyed on the ProviderConfig
 secretRef, makes the flip cost-neutral. Treat that as part of the change rather
 than a someday item.
 
+**Correction (round-2 triage, R2): the added-read table above is incomplete, and
+the TTL cache does not close the gap.** The table counts only the ProviderConfig
+credential path. Two further read classes become live API GETs under the flip:
+
+* every managed resource with a `SecretRef` parameter, read once per `Connect`
+  via `resource.GetSensitiveParameters(ctx, &APISecretClient{kube: ...}, ...)`
+  (`upjet/pkg/controller/external_tfpluginsdk.go:144,285`,
+  `external_tfpluginfw.go:140,225`);
+* the password generator's `Get`.
+
+Both go through upjet's `APISecretClient`, constructed from `mgr.GetClient()`
+inside the 178 generated controllers. A TTL cache in `internal/clients` keyed on
+the ProviderConfig `secretRef` **cannot reach either** — it sits on a different
+code path entirely. The flip is still the right call for the memory and the
+cluster-wide LIST, but its audit-event cost is higher than the table states and
+is not fully mitigable where the mitigation was proposed.
+
 **The no-op status PUT is worth more than recorded.**
 [`architecture-wins.md`](../architecture-wins.md) §5 correctly killed the *etcd*
 half of that lead: the API server byte-compares and discards identical updates
