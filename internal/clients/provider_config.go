@@ -155,6 +155,28 @@ func (a awsEndpointResolverAdaptorWithOptions) ResolveEndpoint(service, region s
 	return a(service, region, options)
 }
 
+// DynamicEndpointURL renders the endpoint URL of a single service from a
+// Dynamic endpoint URL configuration, e.g. "https://ec2.us-east-1.example.com".
+//
+// It is shared by the two places that need it: the AWS SDK endpoint resolver
+// installed by SetResolver, which configures the provider's own STS and
+// account-ID calls, and configureNoForkAWSClient, which configures the
+// Terraform AWS client that performs all resource CRUD. They used to have
+// separate implementations, and only the first one existed, which meant
+// endpoint.url.type: Dynamic was silently ignored for everything that mattered.
+//
+// The service is matched case-insensitively because the two callers name
+// services differently: the SDK resolver is handed an SDK service ID ("IAM"),
+// while the Terraform client is keyed by the Terraform service name ("iam").
+func DynamicEndpointURL(cfg *v1beta1.DynamicURLConfig, service, region string) string {
+	svc := strings.ToLower(service)
+	// NOTE(muvaf): IAM does not have any region.
+	if svc == "iam" {
+		return fmt.Sprintf("%s://%s.%s", cfg.Protocol, svc, cfg.Host)
+	}
+	return fmt.Sprintf("%s://%s.%s.%s", cfg.Protocol, svc, region, cfg.Host)
+}
+
 // SetResolver parses annotations from the managed resource
 // and returns a configuration accordingly.
 func SetResolver(pc *v1beta1.ClusterProviderConfig, cfg *aws.Config) (*aws.Config, error) { // nolint:gocyclo
@@ -179,12 +201,7 @@ func SetResolver(pc *v1beta1.ClusterProviderConfig, cfg *aws.Config) (*aws.Confi
 			if pc.Spec.Endpoint.URL.Dynamic == nil {
 				return aws.Endpoint{}, errors.New("dynamic type is chosen but dynamic configuration is not given") // nolint: staticcheck
 			}
-			// NOTE(muvaf): IAM does not have any region.
-			if service == "IAM" {
-				fullURL = fmt.Sprintf("%s://%s.%s", pc.Spec.Endpoint.URL.Dynamic.Protocol, strings.ToLower(service), pc.Spec.Endpoint.URL.Dynamic.Host)
-			} else {
-				fullURL = fmt.Sprintf("%s://%s.%s.%s", pc.Spec.Endpoint.URL.Dynamic.Protocol, strings.ToLower(service), region, pc.Spec.Endpoint.URL.Dynamic.Host)
-			}
+			fullURL = DynamicEndpointURL(pc.Spec.Endpoint.URL.Dynamic, service, region)
 		default:
 			return aws.Endpoint{}, errors.New("unsupported url config type is chosen") // nolint: staticcheck
 		}

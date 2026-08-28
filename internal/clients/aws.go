@@ -340,6 +340,67 @@ func withExternalAPICallCounter(stack *middleware.Stack) error {
 	return stack.Deserialize.Add(externalAPICallCounterMiddleware, middleware.After)
 }
 
+// tfEndpointOverrides renders the per-service endpoint overrides for the
+// Terraform AWS client from the ProviderConfig's endpoint configuration. The
+// returned map is keyed by the Terraform AWS provider's service name, taken
+// verbatim from endpoint.services, and is never nil.
+//
+// Unlike the AWS SDK endpoint resolver installed by SetResolver, which is
+// consulted lazily for whichever service is being called, the Terraform AWS
+// client takes a fixed map. Every service to be overridden therefore has to be
+// named in endpoint.services, for the Dynamic type just as for Static.
+//
+// An endpoint.url.type that cannot be applied here is an error. Silently
+// returning the default endpoints instead is a fail-open: the operator asked
+// for traffic to go to a private VPC endpoint, an isolated partition or a
+// policy-enforcing proxy, and it would go to public AWS instead.
+func tfEndpointOverrides(ep *namespacedv1beta1.EndpointConfig, region string) (map[string]string, error) {
+	if ep == nil {
+		return map[string]string{}, nil
+	}
+	switch ep.URL.Type {
+	case URLConfigTypeStatic:
+		return staticEndpointOverrides(ep)
+	case URLConfigTypeDynamic:
+		return dynamicEndpointOverrides(ep, region)
+	case URLConfigTypeAuto:
+		// Endpoints are resolved from the configured partition, so there is
+		// nothing to override.
+		return map[string]string{}, nil
+	default:
+		return nil, errors.Errorf("unsupported endpoint.url.type %q", ep.URL.Type)
+	}
+}
+
+// staticEndpointOverrides points every listed service at the one URL the user
+// gave, which is what makes a single-host setup such as localstack work.
+func staticEndpointOverrides(ep *namespacedv1beta1.EndpointConfig) (map[string]string, error) {
+	if ep.URL.Static == nil {
+		return nil, errors.Errorf("endpoint.url.static must be set when endpoint.url.type is %q", URLConfigTypeStatic)
+	}
+	if len(ep.Services) > 0 && *ep.URL.Static == "" {
+		return nil, errors.New("endpoint.url.static cannot be empty")
+	}
+	endpoints := make(map[string]string, len(ep.Services))
+	for _, service := range ep.Services {
+		endpoints[service] = *ep.URL.Static
+	}
+	return endpoints, nil
+}
+
+// dynamicEndpointOverrides templates a URL per listed service, the same way the
+// AWS SDK resolver in SetResolver does.
+func dynamicEndpointOverrides(ep *namespacedv1beta1.EndpointConfig, region string) (map[string]string, error) {
+	if ep.URL.Dynamic == nil {
+		return nil, errors.Errorf("endpoint.url.dynamic must be set when endpoint.url.type is %q", URLConfigTypeDynamic)
+	}
+	endpoints := make(map[string]string, len(ep.Services))
+	for _, service := range ep.Services {
+		endpoints[service] = DynamicEndpointURL(ep.URL.Dynamic, service, region)
+	}
+	return endpoints, nil
+}
+
 // configureNoForkAWSClient populates the supplied *terraform.Setup with
 // Terraform Plugin SDK style AWS client (Meta) and Terraform Plugin Framework
 // style FrameworkProvider
@@ -360,16 +421,17 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 		tfAwsConnsCfg.EC2MetadataServiceEnableState = imds.ClientDisabled
 	}
 
-	if pc.Spec.Endpoint != nil {
-		if pc.Spec.Endpoint.URL.Static != nil {
-			if len(pc.Spec.Endpoint.Services) > 0 && *pc.Spec.Endpoint.URL.Static == "" {
-				return errors.New("endpoint.url.static cannot be empty")
-			} else {
-				for _, service := range pc.Spec.Endpoint.Services {
-					tfAwsConnsCfg.Endpoints[service] = aws.ToString(pc.Spec.Endpoint.URL.Static)
-				}
-			}
-		}
+	endpoints, err := tfEndpointOverrides(pc.Spec.Endpoint, region)
+	if err != nil {
+		return err
+	}
+	tfAwsConnsCfg.Endpoints = endpoints
+	if len(endpoints) == 0 && pc.Spec.Endpoint != nil && pc.Spec.Endpoint.URL.Type != URLConfigTypeAuto && config.Logger != nil {
+		// Terraform resolves endpoints per service, so an override that names
+		// no services has no effect on any resource API call. Say so rather
+		// than quietly talking to the default AWS endpoints.
+		config.Logger.Info("endpoint.url is configured but endpoint.services is empty; resource API calls will use the default AWS endpoints",
+			"endpointURLType", pc.Spec.Endpoint.URL.Type, "providerConfig", pc.GetName())
 	}
 
 	// only used for retrieving the ServicePackages from the singleton provider instance
