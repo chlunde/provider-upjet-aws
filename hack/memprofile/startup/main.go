@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -123,6 +124,18 @@ func main() {
 		mib(ms.HeapAlloc), mib(ms.HeapSys), mib(ms.HeapIdle), mib(ms.HeapInuse), mib(ms.HeapReleased), mib(ms.Sys), mib(ms.TotalAlloc), ms.NumGC)
 	fmt.Printf("   RSS=%.1f MiB  PeakRSS(VmHWM)=%.1f MiB\n", meminfo.RSS(), meminfo.PeakRSS())
 	fmt.Printf("   smaps: %s\n\n", meminfo.Smaps())
+
+	// SCAVENGE: every other figure in this harness is taken after runtime.GC()
+	// only, which collects but does not hand idle spans back to the OS. That
+	// leaves HeapIdle-HeapReleased resident and counted in a pod's working set.
+	// debug.FreeOSMemory() forces the scavenger, so this reports what the
+	// process could hold once startup's garbage is actually returned.
+	if os.Getenv("SCAVENGE") != "" {
+		t0 := time.Now()
+		debug.FreeOSMemory()
+		fmt.Printf("   debug.FreeOSMemory() took %s\n", time.Since(t0).Round(time.Millisecond))
+		reportProcess("after debug.FreeOSMemory()")
+	}
 
 	if f := os.Getenv("NAMES"); f != "" {
 		dumpNames(clusterProvider, f)
