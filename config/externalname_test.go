@@ -6,6 +6,7 @@ package config
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,34 @@ func TestAppStreamUserStackAssociationID(t *testing.T) {
 	parts := strings.SplitN(id, "/", 3)
 	if len(parts) != 3 || parts[0] != "user@example.com" || parts[1] != "USERPOOL" || parts[2] != "my-stack" {
 		t.Errorf("the provider parses %q as %q, want [user@example.com USERPOOL my-stack]", id, parts)
+	}
+}
+
+// TestLightsailDomainEntryID pins the composed Terraform ID and the identifier
+// fields derived from the template. The underscore separator is deliberate: the
+// AWS provider's expandDomainEntry and FindDomainEntryById both fall back to
+// splitting on "_" when the ID has a single flex part.
+func TestLightsailDomainEntryID(t *testing.T) {
+	e := TerraformPluginSDKExternalNameConfigs["aws_lightsail_domain_entry"]
+	id, err := e.GetIDFn(context.Background(), "www", map[string]any{
+		"domain_name": "example.com",
+		"type":        "A",
+		"target":      "127.0.0.1",
+	}, nil)
+	if err != nil {
+		t.Fatalf("GetIDFn returned an error: %v", err)
+	}
+	const want = "www_example.com_A_127.0.0.1"
+	if id != want {
+		t.Errorf("GetIDFn() = %q, want %q", id, want)
+	}
+	// Every .parameters action in the template has to become an identifier
+	// field; a misspelt one is silently dropped, which demotes the attribute to
+	// an optional initProvider field in the generated API.
+	got := append([]string(nil), e.IdentifierFields...)
+	sort.Strings(got)
+	wantFields := []string{"domain_name", "target", "type"}
+	if strings.Join(got, ",") != strings.Join(wantFields, ",") {
+		t.Errorf("IdentifierFields = %q, want %q", got, wantFields)
 	}
 }

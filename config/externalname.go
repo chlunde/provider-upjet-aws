@@ -1891,7 +1891,7 @@ var TerraformPluginSDKExternalNameConfigs = map[string]config.ExternalName{
 	"aws_lightsail_domain": config.IdentifierFromProvider,
 	// aws_lightsail_domain_entry can be imported by using the id attribute
 	// ID: name_domain_name_type_target
-	"aws_lightsail_domain_entry": config.TemplatedStringAsIdentifier("name", "{{ .external_name }}_{{ .parameters.domain_name }}_{{ .parameters.type }}_{{ .parameeters.target }}"),
+	"aws_lightsail_domain_entry": config.TemplatedStringAsIdentifier("name", "{{ .external_name }}_{{ .parameters.domain_name }}_{{ .parameters.type }}_{{ .parameters.target }}"),
 	// Lightsail Instances can be imported using their name
 	"aws_lightsail_instance": config.NameAsIdentifier,
 	// No import
