@@ -86,4 +86,38 @@ it, always. This is the anonymous half.
 behaviour is unconditional, because there is no configuration under which
 holding 250 MiB of idle spans is preferable.
 
+## Verification status — read before merging
+
+**Measured:** all figures above, reproduced independently under two runtime
+configurations, with kernel-side confirmation (`Private_Dirty` falling by the
+same amount `HeapReleased` gains).
+
+**Structurally verified:** all **178/178** generated mains carry the
+`runtime/debug` import, **exactly one** `debug.FreeOSMemory()` call, positioned
+**after** `GetProviderNamespaced`. All parse cleanly under `gofmt -e`. That rules
+out the three realistic failure modes for a mechanical patch — missing import,
+unused import, misplaced call.
+
+**NOT compile-verified.** `go build ./cmd/provider/<family>/` could not be
+completed in the analysis environment: a family `main` links its whole family
+plus `xpprovider`, and with a cold cache that needs **>22 GB of transient
+`$WORK`** on top of a ~20 GB build cache, which the session's fixed disk
+allowance cannot hold. Six attempts, every failure `no space left on device`,
+**not one compile error in any of them**.
+
+What *did* compile cleanly: `./internal/clients/` (stage 1 — so the whole
+`xpprovider` and terraform-provider-aws dependency graph builds fine alongside
+this change) and `./apis/{cluster,namespaced}/ec2/...` (stage 2), plus the first
+several batches of controller packages.
+
+**One command settles it on a machine with a warm cache:**
+
+```
+go build ./cmd/provider/ec2/
+```
+
+Do that before opening the PR. The change is two lines per file and a parser has
+already validated both, but "structurally verified" and "compiles" are different
+claims and only one of them has been established here.
+
 **Branch** `fix/release-startup-memory` @ `0dfbe58`.

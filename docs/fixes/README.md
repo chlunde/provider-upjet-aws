@@ -70,7 +70,7 @@ Deliberately excluded, with reasons:
 | [20](20-path-string-surgery.md) | String surgery on structured field paths corrupts any path containing the manipulated character | correctness | medium (latent) | small | upjet | **implemented, verified** — `fix-path-string-surgery` @ `97467d6` |
 | [21](21-assume-role-session-duration.md) | Assume-role chains get 15-minute sessions against a 1-hour async deadline | data loss | high | small | this repo | **implemented, verified — mitigation only**, `fix/refreshing-credentials-for-async-ops` @ `8f2462c`; one live-account check wanted before shipping |
 | [22](22-changelog-attribute-details.md) | Change-log entries say only "an update happened"; the changed attribute set is discarded | observability | medium-high | small | upjet | **implemented, verified** — `feat-changelog-attribute-details` @ `e337a43` |
-| [23](23-release-startup-heap.md) | 180–255 MiB of idle heap is never returned after startup | **waste / cost** | **high** | **tiny** | this repo | **implemented, measured** — `fix/release-startup-memory` @ `0dfbe58` |
+| [23](23-release-startup-heap.md) | 180–255 MiB of idle heap is never returned after startup | **waste / cost** | **high** | **tiny** | this repo | **measured + structurally verified, NOT compile-verified** — `fix/release-startup-memory` @ `0dfbe58`; run `go build ./cmd/provider/ec2/` first |
 
 ## Confirmed in round-2 triage, no branch yet
 
