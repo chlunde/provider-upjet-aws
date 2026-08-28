@@ -397,6 +397,53 @@ the entry. The TTL is deliberately below the 15-minute minimum STS session
 duration so a cached provider is re-resolved before the SDK would refresh it
 from a possibly-cancelled reconcile context.
 
+## Correction: fix 14 does not take steady-state writes to zero
+
+A second round of lead-hunting found a guaranteed **spec** write that the
+earlier steady-state audit missed, so the claim recorded above — that
+suppressing the no-op status update leaves zero Kubernetes writes per reconcile
+— is wrong. It takes them from two to one.
+
+`Tagger.Initialize` (upjet `pkg/config/resource.go:351`) sets the three
+Crossplane external tags into `spec.forProvider` and then calls
+`t.kube.Update(ctx, mg)` **unconditionally**, with no comparison against what is
+already there. The values it writes are derived from the managed resource's own
+kind, name and provider, so after the first reconcile the object is byte
+identical and the API server discards the update — but the request is still
+sent, admitted and audited, exactly like the status write.
+
+`r.managed.Initialize(ctx, managed)` runs on every reconcile
+(crossplane-runtime `pkg/reconciler/managed/reconciler.go:1115`), and
+provider-upjet-aws applies `AddExternalTagsField()` as a default resource
+option, so this affects every taggable resource — around 495 of them.
+
+Verified by reading both call sites; not measured. Under the audit-cost lens
+this is now the highest value-per-line item outstanding, and it is the same
+shape of fix as 14: compare before writing.
+
+## Second lead round
+
+`scratchpad/leads-round2.md` (outside the repo) holds 20 new leads across all
+three repositories, none overlapping the closed L1–L30 set or the 14 fixes.
+Three were spot-checked here:
+
+* **R1** — the `Tagger.Initialize` write above. Confirmed at both call sites.
+* **R7** — `config/externalname.go:1894` templates the external name for
+  `aws_lightsail_domain_entry` with `{{ .parameeters.target }}`. A typo, in a
+  live template, that also demonstrates nothing exercises these templates in
+  tests. Confirmed by inspection.
+* **R12** — `conditionalFilter` (upjet `pkg/resource/lateinit.go:202`) applies
+  `name.NewFromCamel(cName).Snake` to what `fieldpath.GetValue` then treats as a
+  path. This is the same defect class as fix 07 but in a different file, so fix
+  07 is not wrong — it was scoped to its four call sites and this instance was
+  never in scope. Whether it bites depends on whether callers pass dotted paths;
+  unverified.
+
+The generator's own view was that the least-examined ground is the hand-written
+per-service `config/cluster/*/config.go` custom diffs and external-name
+templates: one sweep of the 67 templated identifiers surfaced two breakages
+against upstream plus the typo above.
+
 ## Suggested order
 
 1. **02, 12, 13** — very small, self-contained, each independently verifiable.
