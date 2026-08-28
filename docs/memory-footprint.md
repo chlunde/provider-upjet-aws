@@ -435,3 +435,114 @@ them accordingly.
   include list is a *precondition* — you cannot skip parsing what you still need —
   but is not itself the win. **That case is unmeasured**; it needs an upjet fork,
   and no number should be quoted for it until someone runs it.
+
+---
+
+## Shipping the startup win: the safety invariant, and one violation
+
+The startup result above (24.2 s → 4.1 s, and 28.4 s → 4.3 s under
+`GOMEMLIMIT=300MiB`) is the one memory-investigation finding worth acting on. It
+is entirely downstream — no upjet change — but it is **not** as simple as
+threading a family through `GetProvider`.
+
+### Why it can panic
+
+Every generated controller does an unchecked map index followed by a field
+access, e.g. `internal/controller/cluster/ec2/instance/zz_controller.go:53`:
+
+```go
+for _, i := range o.Provider.Resources["aws_instance"].InitializerFns {
+```
+
+`config.Provider.Resources` is `map[string]*config.Resource`
+(upjet `pkg/config/provider.go:187`), so a missing key yields a nil pointer and
+this **panics at provider startup**. There are **3,136** such index sites across
+2,058 files, covering 1,029 distinct Terraform names.
+
+So the safety of family filtering reduces to one invariant:
+
+> for every family F, the names the filter keeps must be a **superset** of the
+> names the controllers registered by `Setup_F` index.
+
+Corollary worth stating: under a filter, `Setup_<family>` becomes the **only**
+legal entry point. `Setup_monolith` with a filter applied panics by construction.
+
+### The invariant does not hold today
+
+`config/family_filter_test.go` (branch `claude/family-filter-safety-test` @
+`1357cf5`) checks it for all 177 generated families plus the monolith. **176 hold
+exactly** — kept set and indexed set are equal, not merely a superset. One fails:
+
+```
+UPJET_FAMILY_FILTER=elbv2 drops 1 of the 7 Terraform resource(s) that Setup_elbv2
+registers controllers for. config.Provider.Resources would hold no entry for them,
+so Setup_elbv2 panics with a nil pointer dereference at provider startup. Missing:
+  aws_lb_trust_store (../internal/controller/cluster/elbv2/lbtruststore)
+```
+
+Root cause: `config/cluster/elbv2/config.go:165` (and the identical namespaced
+file) sets the group **imperatively, inside a resource configurator**:
+
+```go
+p.AddResourceConfigurator("aws_lb_trust_store", func(r *config.Resource) {
+	r.ShortGroup = "elbv2"
+	r.Kind = "LBTrustStore"
+})
+```
+
+Those two lines are the **only** imperative `ShortGroup` assignments in the repo.
+Any *static* derivation of a resource's family — `GroupMap` plus upjet's default
+"second word" rule — computes `lb` for that name and can never see the override,
+because the override runs later, during provider configuration.
+
+### The design call this forces
+
+1. **Special-case it in the static mirror.** One line, works today, and the next
+   imperative `ShortGroup` assignment silently reintroduces the panic — with
+   nothing but this test to catch it.
+2. **Drive the filter off a generated group table**, emitted from the
+   fully-configured provider so overrides are captured by construction. More
+   work, and it makes the include lists a build artifact rather than a
+   hand-maintained list, but it cannot rot.
+
+(2) is the right answer for anything heading to a release; (1) is defensible only
+with the test as a permanent gate.
+
+### What the test does that matters
+
+* **Kept side in-process, through the production code** — it calls the same three
+  `*ResourceList()` functions `GetProvider` calls, so it tracks the real filter
+  rather than a copy, and replicates upjet's actual `matches` rule (include
+  entries are `name$` with no `^`; one `skipList` entry has no anchor at all).
+* **Controller side via go/ast** over the per-family setup files' imports, then
+  the string literals under `*.Provider.Resources[...]` index expressions. There
+  is no in-process source of truth for what `Setup_F` registers, and getting one
+  would mean importing `internal/controller` — i.e. `internal/clients` and the
+  whole `apis` tree.
+* **Three guards against a vacuous pass**, which is the real risk for a test like
+  this: it fails if the filter did not actually filter
+  (`len(kept) >= len(unfiltered)`), fails on a non-literal map key so a codegen
+  template change cannot make the scan blind, and reports pre-existing
+  unconfigured names in a separate subtest so they are not misattributed.
+* Lives in `package config`, importing none of `internal/clients`,
+  `internal/controller`, `apis` or `xpprovider`. Run it as
+  `go test ./config -run TestFamilyFilterKeepsEveryIndexedResource` — **not**
+  `./config/...`, which drags in the 634 s `config/test/roundtrip`.
+
+Test body runs in **0.48 s**. Verified independently: the `elbv2` failure
+reproduces, and deliberately dropping `aws_instance` from the filter fails `ec2`
+naming that resource.
+
+### Still needs a cluster
+
+* A filtered family binary reaching `Ready` on a real MR — the panic is
+  startup-time, so this fails fast if the invariant is violated somewhere the
+  static test cannot see.
+* **Cross-family references** — an `ec2` resource resolving against `iam` or
+  `s3`. Reading suggests `ResolveReferences` goes through
+  `apisresolver.GetManagedResource` and the *scheme* (which still registers all
+  8,488 GVKs, at 4 MiB) rather than through `Provider.Resources`, so filtering
+  should not touch it. That is code reading, and it is the one interaction worth
+  observing before shipping.
+* Webhook and conversion setup for a filtered family, since
+  `SetupWebhookWithManager_<family>` runs on a different path from `Setup_<family>`.
