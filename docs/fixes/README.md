@@ -67,6 +67,7 @@ Deliberately excluded, with reasons:
 | [17](17-update-connection-details.md) | `Update` returns no connection details, so a rotated credential lands one Observe late | correctness | low | small | upjet | **implemented, verified** — `fix-update-connection-details` @ `edfc8db` |
 | [18](18-framework-replace-messages.md) | Three misleading messages on the Framework replace path | observability | low | **trivial** | upjet | **implemented, verified** — `fix-error-message-defects` @ `95385db` |
 | [19](19-external-name-template-defects.md) | Two malformed external-name templates, plus a guard that makes the class detectable | correctness | high | small | this repo | **implemented, verified** — `fix-external-name-template-defects` @ `453072d` |
+| [20](20-path-string-surgery.md) | String surgery on structured field paths corrupts any path containing the manipulated character | correctness | medium (latent) | small | upjet | **implemented, verified** — `fix-path-string-surgery` @ `97467d6` |
 
 ## Confirmed in round-2 triage, no branch yet
 
@@ -78,12 +79,11 @@ do next. None of these has a patch.
 | --- | --- | --- | --- | --- |
 | R3 | The `s`-suffix trim mangles connection-secret keys for map/list sensitive attributes — `connection_propertie`, `airflow_configuration_option` (`pkg/resource/sensitive.go:473`) | correctness | small but **API-breaking** | upjet |
 | R11 | Two unasserted `Conversions[1:]` index assumptions, including `config/cluster/elasticache/config.go:114` | maintainability | small | this repo |
-| R12, R14 | Whole-path camel→snake in `conditionalFilter`; `ReplaceAll(e,"0","*")` corrupts inject-key paths | correctness (latent) | small | upjet |
 | R10 | A Version-only SNS/SQS policy change is silently suppressed — deliberate, and no clean fix exists | correctness | — | this repo |
 | R20 | ProviderConfig inconsistency affecting `sts:GetCallerIdentity` only | correctness | small | this repo |
 
 Branched since this table was written: R9 became fix 15, R1 fix 16, R6 fix 17,
-R16 and R17 fix 18, and R7 and R8 fix 19. R2 is not a fix but a correction to
+R16 and R17 fix 18, R7 and R8 fix 19, and R12 and R14 fix 20. R2 is not a fix but a correction to
 fix 11's cost accounting, recorded in the audit-cost note below.
 
 Two findings surfaced while fixing the above and are recorded in the fix files
