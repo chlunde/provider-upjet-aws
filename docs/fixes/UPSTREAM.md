@@ -6,7 +6,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Handover: what to propose, where, and in what order
 
-Sixteen branches across three forks. No pull request has been opened anywhere.
+Seventeen branches across three forks. No pull request has been opened anywhere.
 Full write-up for each is the numbered file in this directory; this page is just
 the shape of the thing.
 
@@ -34,6 +34,7 @@ Ordered by what I would send first.
 | [04](04-missing-secret-key.md) | `fix-error-on-missing-secret-key` @ `32e9967` | A missing secret key silently becomes `""` | corruption |
 | [17](17-update-connection-details.md) | `fix-update-connection-details` @ `edfc8db` | `Update` returns no connection details | correctness, low |
 | [18](18-framework-replace-messages.md) | `fix-error-message-defects` @ `95385db` | Three misleading messages on the replace path | observability |
+| [22](22-changelog-attribute-details.md) | `feat-changelog-attribute-details` @ `e337a43` | Populate change-log `AdditionalDetails` with the changed attribute set | observability, feature |
 | [07](07-fieldpath-camel-snake.md) | `fix-fieldpath-segmentwise-camel-snake` @ `046b8f2` | camel→snake mangles nested paths (annotations) | corruption, latent |
 | [20](20-path-string-surgery.md) | `fix-path-string-surgery` @ `97467d6` | Same class, two more sites (inject keys, late-init filter) | correctness, latent |
 
@@ -89,10 +90,11 @@ fork, which is why every upjet branch here uses dashes.
 * **Fix 05 — external-name persistence on failed or async create.** Not attempted
   all session: it reverses a decision documented in upjet, which is the same trap
   that forced half of fix 04 to be reverted.
-* **I8 — publishing the Terraform diff.** The `AdditionalDetails` half is small
-  and `AdditionalDetails` is used nowhere in upjet today, so every change-log
-  entry currently says only "an update happened". The status-field half needs an
-  API version and a size bound. Maintainer conversation before code.
+* **I8 — publishing the Terraform diff.** The `AdditionalDetails` half is now
+  implemented as fix 22. The status-field and Event halves need an API version and
+  a size bound, and remain a maintainer conversation before code. Fix 22 is the
+  one branch here that is a *feature* rather than a defect fix, so it is the most
+  likely to want buy-in before review.
 
 ## Worth checking against a real account
 

@@ -69,6 +69,7 @@ Deliberately excluded, with reasons:
 | [19](19-external-name-template-defects.md) | Two malformed external-name templates, plus a guard that makes the class detectable | correctness | high | small | this repo | **implemented, verified** — `fix-external-name-template-defects` @ `453072d` |
 | [20](20-path-string-surgery.md) | String surgery on structured field paths corrupts any path containing the manipulated character | correctness | medium (latent) | small | upjet | **implemented, verified** — `fix-path-string-surgery` @ `97467d6` |
 | [21](21-assume-role-session-duration.md) | Assume-role chains get 15-minute sessions against a 1-hour async deadline | data loss | high | small | this repo | **implemented, verified — mitigation only**, `fix/refreshing-credentials-for-async-ops` @ `8f2462c`; one live-account check wanted before shipping |
+| [22](22-changelog-attribute-details.md) | Change-log entries say only "an update happened"; the changed attribute set is discarded | observability | medium-high | small | upjet | **implemented, verified** — `feat-changelog-attribute-details` @ `e337a43` |
 
 ## Confirmed in round-2 triage, no branch yet
 
@@ -94,9 +95,10 @@ field-path rendering decision (fix 18); and `ExternalNameNotTestedConfigs`
 references `{{ .setup.configuration.account_id }}`, a setup key the provider does
 not populate — latent, since no registry references that map (fix 19).
 
-Forward-looking work that is not a defect fix lives in [ideas.md](../ideas.md) —
-notably surfacing the Terraform diff, which is computed on every Observe and
-discarded, while `ExternalUpdate.AdditionalDetails` is used nowhere in upjet.
+Forward-looking work that is not a defect fix lives in [ideas.md](../ideas.md).
+Its top item — surfacing the Terraform diff — is now partly done as
+[fix 22](22-changelog-attribute-details.md), which covers the `AdditionalDetails`
+mechanism; the status-field and Event mechanisms remain proposals.
 
 ## Progress
 
