@@ -50,7 +50,7 @@ Deliberately excluded, with reasons:
 | - | --- | --- | --- | --- | --- | --- |
 | [01](01-movetostatus-shared-schema.md) | Stop `MoveToStatus` mutating shared schema singletons | corruption | **critical** | small | upjet | **implemented, verified** — `chlunde/upjet` `fix-movetostatus-copy-before-mutate` @ `9124f35` |
 | [02](02-clear-schemafunc.md) | Clear `SchemaFunc` after materialising `Schema` | correctness + waste | high | **1 line** | upjet | **implemented, verified** — `fix-clear-schemafunc-after-materialise` @ `786ec33` |
-| [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | not started |
+| [03](03-async-credential-expiry.md) | Credentials expire mid-operation on async paths | data loss | high | medium | this repo | **partially addressed by fix 21** — the full fix needs a change to the `xpprovider` surface of the terraform-provider-aws fork |
 | [04](04-missing-secret-key.md) | A missing secret key silently becomes `""` | corruption | high | small | upjet | **implemented, narrowed** — `fix-error-on-missing-secret-key` @ `32e9967` |
 | [05](05-create-external-name.md) | Persist the external-name when create fails or is async | data loss | high | small | upjet | not started |
 | [06](06-dynamic-endpoint-ignored.md) | `endpoint.url.type: Dynamic` never reaches the CRUD client | correctness | high | small | this repo | not started |
@@ -68,6 +68,7 @@ Deliberately excluded, with reasons:
 | [18](18-framework-replace-messages.md) | Three misleading messages on the Framework replace path | observability | low | **trivial** | upjet | **implemented, verified** — `fix-error-message-defects` @ `95385db` |
 | [19](19-external-name-template-defects.md) | Two malformed external-name templates, plus a guard that makes the class detectable | correctness | high | small | this repo | **implemented, verified** — `fix-external-name-template-defects` @ `453072d` |
 | [20](20-path-string-surgery.md) | String surgery on structured field paths corrupts any path containing the manipulated character | correctness | medium (latent) | small | upjet | **implemented, verified** — `fix-path-string-surgery` @ `97467d6` |
+| [21](21-assume-role-session-duration.md) | Assume-role chains get 15-minute sessions against a 1-hour async deadline | data loss | high | small | this repo | **implemented, verified — mitigation only**, `fix/refreshing-credentials-for-async-ops` @ `8f2462c`; one live-account check wanted before shipping |
 
 ## Confirmed in round-2 triage, no branch yet
 
