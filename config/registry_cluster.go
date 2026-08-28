@@ -125,6 +125,9 @@ func GetProvider(ctx context.Context, fwProvider fwprovider.Provider, sdkProvide
 	}
 
 	pc.ConfigureResources()
+	if !generationProvider {
+		dropCodegenOnlyMetadata(pc)
+	}
 	return pc, bumpVersionsWithEmbeddedLists(pc)
 }
 

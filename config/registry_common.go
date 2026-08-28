@@ -6,7 +6,10 @@ package config
 
 import (
 	_ "embed"
+	"os"
+	"strings"
 
+	"github.com/crossplane/upjet/v2/pkg/config"
 	conversiontfjson "github.com/crossplane/upjet/v2/pkg/types/conversion/tfjson"
 	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
@@ -71,7 +74,7 @@ func CLIReconciledResourceList() []string {
 		l[i] = name + "$"
 		i++
 	}
-	return l
+	return filterToFamily(l)
 }
 
 // TerraformPluginSDKResourceList returns the list of resources that have external
@@ -85,7 +88,7 @@ func TerraformPluginSDKResourceList() []string {
 		l[i] = name + "$"
 		i++
 	}
-	return l
+	return filterToFamily(l)
 }
 
 func TerraformPluginFrameworkResourceList() []string {
@@ -96,5 +99,76 @@ func TerraformPluginFrameworkResourceList() []string {
 		l[i] = name + "$"
 		i++
 	}
-	return l
+	return filterToFamily(l)
+}
+
+// dropCodegenOnlyMetadata releases the Terraform registry metadata (resource
+// descriptions, argument docs and examples scraped from the Terraform provider
+// documentation) that upjet attaches to every config.Resource. It is only read
+// by the code generation pipelines, so keeping it around costs the provider
+// runtime tens of MiB of live heap for the ~1000 configured resources without
+// ever being used. Must only be called for a non-generation provider, and only
+// after the reference injectors and the resource configurators have run, since
+// those do consume the metadata.
+func dropCodegenOnlyMetadata(pc *config.Provider) {
+	for _, r := range pc.Resources {
+		r.MetaResource = nil
+	}
+}
+
+// familyFilterEnv names the environment variable that restricts the include
+// lists this provider hands to upjet's config.NewProvider to one or more API
+// short groups (comma separated), e.g. UPJET_FAMILY_FILTER=ec2.
+//
+// This exists for the memory measurement in hack/memprofile: it makes it
+// possible to build the *same* binary and toggle, at run time, whether the
+// provider configures all ~1,029 resources or only one family's. A resource
+// that is in none of the include lists is skipped by config.NewProvider
+// entirely - before DefaultResource, before the SchemaFunc() materialisation,
+// before the schema traversers and before the registry metadata is attached -
+// which is exactly the work a per-family include list would avoid.
+//
+// It is deliberately inert unless the variable is set, so the shipped
+// behaviour is unchanged.
+const familyFilterEnv = "UPJET_FAMILY_FILTER"
+
+// shortGroupOf returns the API short group that would be assigned to the given
+// Terraform resource name, computed statically from the name alone. It mirrors
+// upjet's config.DefaultResource default (the second word of the resource name,
+// or the first when the name has fewer than three words) as overridden by this
+// repository's GroupMap, which GroupKindOverrides() applies as a default
+// resource option. No config.Resource, and therefore no schema, is needed.
+func shortGroupOf(resource string) string {
+	if f, ok := GroupMap[resource]; ok {
+		g, _ := f(resource)
+		return g
+	}
+	words := strings.Split(resource, "_")
+	if len(words) < 3 {
+		return words[0]
+	}
+	return words[1]
+}
+
+// filterToFamily drops from an include list every entry whose API short group
+// is not named by familyFilterEnv. Entries are "<terraform name>$" regexes, as
+// produced by the three *ResourceList functions above.
+func filterToFamily(l []string) []string {
+	v := os.Getenv(familyFilterEnv)
+	if v == "" {
+		return l
+	}
+	keep := map[string]bool{}
+	for _, g := range strings.Split(v, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			keep[g] = true
+		}
+	}
+	out := make([]string, 0, len(l))
+	for _, e := range l {
+		if keep[shortGroupOf(strings.TrimSuffix(e, "$"))] {
+			out = append(out, e)
+		}
+	}
+	return out
 }
