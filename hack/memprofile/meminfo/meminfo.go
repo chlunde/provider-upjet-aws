@@ -107,3 +107,32 @@ func SinceExec() time.Duration {
 	// USER_HZ is 100 on every Linux platform Go builds for.
 	return time.Duration((uptime - ticks/100) * float64(time.Second))
 }
+
+// SmapsFields returns the /proc/self/smaps_rollup counters, in MiB, keyed by
+// the field name without its colon ("Rss", "Pss", "Private_Clean",
+// "Private_Dirty", "Anonymous", ...). Smaps() formats the same data for a
+// human; this returns it for a time series.
+func SmapsFields() map[string]float64 {
+	out := map[string]float64{}
+	b, err := os.ReadFile("/proc/self/smaps_rollup")
+	if err != nil {
+		return out
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 3 || !strings.HasSuffix(f[0], ":") || f[2] != "kB" {
+			continue
+		}
+		kb, err := strconv.ParseFloat(f[1], 64)
+		if err != nil {
+			continue
+		}
+		out[strings.TrimSuffix(f[0], ":")] = kb / 1024
+	}
+	return out
+}
+
+// Anonymous returns the smaps_rollup Anonymous counter in MiB: the process's
+// anonymous (heap and stack) resident pages, which is the part of a pod's
+// working set that scavenging can actually return.
+func Anonymous() float64 { return SmapsFields()["Anonymous"] }

@@ -33,6 +33,49 @@ Two kinds of measurement:
   `hack/memprofile/schemadump`. See `docs/reconcile-workflow.md`,
   `docs/reconcile-workflow-detail.md` and `docs/architecture-wins.md`.
 
+* `hack/memprofile/steadystate` answers what happens *after* startup. Every
+  other program here reports the instant the startup path finishes; this one
+  runs the same startup path and then holds the process open for an
+  observation window, sampling `/proc/self/smaps_rollup` and `runtime.MemStats`
+  together on a fixed interval and **never calling `runtime.GC()` while
+  sampling**, so what it shows is what the runtime does unprompted. It answers
+  three questions: whether Go's background scavenger returns the idle startup
+  heap on its own and how fast, what sustained reconcile-shaped work re-grows
+  the anonymous footprint to after an explicit `debug.FreeOSMemory()`, and
+  whether `GOMEMLIMIT` changes either.
+
+  Its `WORKLOAD=reconcile` mode is a **proxy**, not a real reconcile: there is
+  no cluster and no AWS account. Per iteration it replays the pure-CPU parts of
+  Connect+Observe — the `CoreConfigSchema()`/`SchemaFunc` schema rebuilds, the
+  params->cty->InstanceState->InstanceDiff->JSON-map round trip, and the
+  typed-MR JSON round trips and `DeepCopy` — i.e. sections 3, 4, 8 and 9 of
+  `hack/memprofile/reconcile`, in a loop. It does **not** model the AWS SDK
+  request/response cycle, controller-runtime's informer cache (a real
+  steady-state consumer that grows with the MR count and that this proxy has
+  none of), client-go, the workqueue, or the per-Connect AWS client
+  construction. It is therefore a lower bound on per-reconcile churn with no
+  growing live set.
+
+  | variable | effect |
+  | --- | --- |
+  | `WORKLOAD=idle` (default) or `reconcile` | what runs during the window |
+  | `DURATION=15m` | length of the observation window (default `10m`) |
+  | `INTERVAL=15s` | sampling period (default `15s`) |
+  | `SCAVENGE_AFTER_STARTUP=1` | one `debug.FreeOSMemory()` before the window |
+  | `SCAVENGE_EVERY=5m` | `debug.FreeOSMemory()` on a ticker inside the window |
+  | `QPS=2` | reconcile iterations per second; `0` (default) runs flat out |
+
+```console
+go build -o /tmp/steadystate ./hack/memprofile/steadystate
+
+# does the background scavenger return the startup heap on its own?
+WORKLOAD=idle DURATION=15m INTERVAL=15s /tmp/steadystate
+GOMEMLIMIT=300MiB WORKLOAD=idle DURATION=15m INTERVAL=15s /tmp/steadystate
+
+# what does sustained reconcile-shaped work re-grow it to?
+SCAVENGE_AFTER_STARTUP=1 WORKLOAD=reconcile QPS=2 DURATION=15m /tmp/steadystate
+```
+
 * `hack/memprofile/schemadump` prints the same flag dump from a pristine
   process — the Terraform AWS provider without any of this repository's
   `config/` edits. Diffing it against the `SCHEMA_DUMP` output separates
