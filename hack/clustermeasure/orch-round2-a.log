@@ -1,0 +1,31 @@
+18:15:38 MATRIX DONE
+18:15:38 MATRIX DONE
+18:15:38 ARM trim2 ENV GODEBUG=disablethp=1 BIN=provider-trim2 UPJET_PPROF_ADDR=:6060
+18:15:56 READY trim2 ready_s=14
+18:15:56 LOG trim2 {"level":"info","ts":"2026-08-29T18:15:55Z","logger":"provider-aws","msg":"provider configuration built","sinceStart":"12.957329298s","clusterResources":1029,"namespacedResources":1029}
+18:17:26 PHASE trim2 idle-done
+18:17:36 CREATED trim2 ready_buckets=50 in 100s
+18:22:37 LIMITS trim2 restarts=0 lastTerm=none max=max peak=5484544 events: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+18:22:37 END trim2
+18:22:37 ARM trim2-memlimit200 ENV GODEBUG=disablethp=1 GOMEMLIMIT=200MiB BIN=provider-trim2 UPJET_PPROF_ADDR=:6060
+18:22:55 READY trim2-memlimit200 ready_s=14
+18:22:55 LOG trim2-memlimit200 {"level":"info","ts":"2026-08-29T18:22:54Z","logger":"provider-aws","msg":"provider configuration built","sinceStart":"12.876820673s","clusterResources":1029,"namespacedResources":1029}
+18:24:25 PHASE trim2-memlimit200 idle-done
+18:24:35 CREATED trim2-memlimit200 ready_buckets=50 in 100s
+18:29:36 LIMITS trim2-memlimit200 restarts=0 lastTerm=none max=max peak=4915200 events: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+18:29:36 END trim2-memlimit200
+18:29:36 ARM trim2-filter ENV UPJET_FAMILY_FILTER=s3 GODEBUG=disablethp=1 BIN=provider-trim2 UPJET_PPROF_ADDR=:6060
+18:29:42 READY trim2-filter ready_s=2
+18:29:42 LOG trim2-filter {"level":"info","ts":"2026-08-29T18:29:41Z","logger":"provider-aws","msg":"provider configuration built","sinceStart":"542.242876ms","clusterResources":25,"namespacedResources":25}
+18:31:12 PHASE trim2-filter idle-done
+18:31:22 CREATED trim2-filter ready_buckets=50 in 100s
+18:36:22 LIMITS trim2-filter restarts=0 lastTerm=none max=max peak=214999040 events: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+18:36:22 END trim2-filter
+18:36:22 ARM lim256-trim2-filter ENV BIN=provider-trim2 PODLIMIT=256Mi UPJET_FAMILY_FILTER=s3 GODEBUG=disablethp=1 GOMEMLIMIT=200MiB
+18:36:30 READY lim256-trim2-filter ready_s=4
+18:36:30 LOG lim256-trim2-filter {"level":"info","ts":"2026-08-29T18:36:27Z","logger":"provider-aws","msg":"provider configuration built","sinceStart":"486.739126ms","clusterResources":25,"namespacedResources":25}
+18:38:00 PHASE lim256-trim2-filter idle-done
+18:38:11 CREATED lim256-trim2-filter ready_buckets=50 in 101s
+18:43:11 LIMITS lim256-trim2-filter restarts=0 lastTerm=none max=max peak=5201920 events: low 0 high 0 max 0 oom 0 oom_kill 0 oom_group_kill 0 sock_throttled 0 
+18:43:11 END lim256-trim2-filter
+18:43:11 MATRIX DONE

@@ -60,18 +60,47 @@ def trim_schema():
           f"({len(fw)} framework schemas kept, {len(rs) - len(fw)} stubbed)")
 
 
+def configured_names():
+    """Resources with a custom configurator. Those configurators run at provider
+    startup and several of them index into the metadata without a nil or length
+    check - config/cluster/apigatewayv2/config.go:50 does
+    r.MetaResource.Examples[0].SetPathValue(...), which panics outright if the
+    examples are missing. So their entries have to survive whole."""
+    names = set()
+    for root, _, files in os.walk("config"):
+        for f in files:
+            if f.endswith(".go"):
+                names.update(re.findall(r'AddResourceConfigurator\("([a-z0-9_]+)"', open(os.path.join(root, f)).read()))
+    return names
+
+
 def trim_meta():
+    keep = configured_names()
     out = ["name: hashicorp/terraform-provider-aws", "resources:"]
-    n = 0
+    n = kept = 0
+    block = None
     for line in open(META):
         ind = len(line) - len(line.lstrip(" "))
         if line.startswith("    ") and ind == 4 and line.rstrip().endswith(":"):
+            if block is not None:
+                out += block
             name = line.strip()[:-1]
-            out += [f"    {name}:", f"        name: {name}", f"        title: {name}", "        argumentDocs: {}"]
+            if name in keep:
+                block = [line.rstrip("\n")]
+                kept += 1
+            else:
+                block = None
+                out += [f"    {name}:", f"        name: {name}", f"        title: {name}", "        argumentDocs: {}"]
             n += 1
+            continue
+        if block is not None:
+            block.append(line.rstrip("\n"))
+    if block is not None:
+        out += block
     os.replace(META, META + ".orig")
     open(META, "w").write("\n".join(out) + "\n")
-    print(f"{META}: {os.path.getsize(META + '.orig')/1e6:.1f} MB -> {os.path.getsize(META)/1e6:.1f} MB ({n} resources kept)")
+    print(f"{META}: {os.path.getsize(META + '.orig')/1e6:.1f} MB -> {os.path.getsize(META)/1e6:.1f} MB "
+          f"({n} resources, {kept} kept whole because they have a configurator)")
 
 
 if __name__ == "__main__":

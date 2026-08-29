@@ -213,3 +213,194 @@ Ranked by measured effect on the steady-state pod metric, cheapest first.
 * `--skip-default-tags` is set, and an S3 Control tag shim stands in for a
   LocalStack gap, so the tag path is lighter than production.
 * The executable's resident pages are not charged to the pod here; see §6.
+
+
+---
+
+# Round 2: how much lower can it go, and what breaks first
+
+The first round asked what a pod costs and which of the existing proposals move
+it. This round asks what is left after `disablethp`, what happens under a real
+memory limit, and whether the embedded blobs can simply not be parsed.
+
+Same harness. Every arm below carries `GODEBUG=disablethp=1` unless stated, so
+the numbers are the cgroup's view of the runtime's own behaviour rather than the
+huge-page inflation measured in round 1. Arms after a machine reboot are marked;
+they are internally consistent (`ctrl-rerun` reproduces `nothp-ctrl` to 1.5%).
+
+## Where the remaining memory is
+
+A heap profile and a goroutine dump from a steady-state pod (unfiltered,
+`disablethp`, 50 MRs), taken through `UPJET_PPROF_ADDR`:
+
+| | |
+| --- | ---: |
+| live heap (`inuse_space`, after GC) | **72.6 MiB** |
+| goroutine stacks | 28.7 MiB |
+| GC metadata, mspan, buckhash, other | ~15 MiB |
+| resident heap arena (`heap_sys` 359 − `heap_released` 178) | ~181 MiB |
+| `go_memstats_sys_bytes` | 406.2 MiB |
+
+**The live object graph is not the problem and never was.** Its largest single
+line is upjet's `DefaultResource` at 4.5 MB; then `reflect.compiledTypelinks`
+4.1 MB and `Scheme.AddKnownTypeWithName` 5.7 MB (the 8,488 GVKs - so per-family
+API packages have an anonymous-memory component too, not just text), and ~12 MB
+of compiled regexes. What a pod holds is the **arena high-water mark left by
+startup**, which is why every lever below is really a lever on the peak.
+
+Two side findings from the same dump:
+
+* **6,278 goroutines, 5,001 of them parked in controller-runtime's priority
+  queue - 28.7 MiB of stacks.** That is with the shipped default
+  `--max-reconcile-rate=100`. At `=10` the same workload runs ~1,500 goroutines
+  and ~7 MiB. The default costs **~22 MiB of stacks**.
+* Goroutines also scale with the managed-resource count, at roughly 5 per MR:
+  50 MRs → 1,735, 500 MRs → 4,101.
+
+## Under a real memory limit: reclaim, until it isn't
+
+`memory.max` is enforced against `memory.current`, so the huge-page inflation
+from round 1 is charged against the limit, not just reported.
+
+| limit | THP | `GOMEMLIMIT` | peak | outcome |
+| --- | --- | --- | ---: | --- |
+| 512Mi | on | - | 512.0 (= limit) | Ready, 0 kills, 1 reclaim event |
+| 512Mi | off | - | 391.3 | Ready, no events |
+| 400Mi | on | - | 400.0 (= limit) | Ready, 0 kills, 1 reclaim event |
+| 400Mi | off | - | 399.1 | Ready, no events |
+| 300Mi | on | - | - | **OOMKilled ×10, CrashLoopBackOff** |
+| 300Mi | off | - | - | **OOMKilled ×10, CrashLoopBackOff** |
+| 300Mi | on | 250MiB | 299.6 | Ready, 0 restarts |
+| 300Mi | off | 250MiB | 250.6 | Ready, 0 restarts |
+
+Two conclusions, and the second is the one that matters operationally.
+
+**The deferred-split charge is reclaimable while there is slack.** At 512Mi and
+400Mi the THP arm pressed exactly to its limit, tripped one `max` event, and the
+kernel split and freed rather than killing. `deferred_split_shrinker` is
+memcg-aware, and it works.
+
+**Below the startup peak, nothing saves you - and `disablethp` is not what
+saves you.** At 300Mi both arms die identically, because the Go runtime has no
+idea what the cgroup limit is. `GOMEMLIMIT` is the thing that tells it, and with
+it both arms run clean at 300Mi. Turning huge pages off lowers what gets
+*charged*; only `GOMEMLIMIT` makes the runtime *back off*.
+
+## Holding down the startup spike
+
+All unfiltered, `disablethp`, 50 MRs:
+
+| arm | peak | steady | config build |
+| --- | ---: | ---: | ---: |
+| control | 395.0 | 230.7 | 13.60 s |
+| `GOMEMLIMIT=300MiB` | 292.9 | 228.1 | 14.99 s |
+| `GOMEMLIMIT=200MiB` | 229.6 | 188.4 | **55.96 s** |
+| `GOGC=25` | 265.8 | 168.6 | 17.08 s |
+| `GOMAXPROCS=2` | 438.0 | 235.3 | 14.69 s |
+
+* **Turning down concurrency does not help.** `GOMAXPROCS=2` makes the peak
+  slightly *worse*. There is nothing concurrent to throttle in the startup path:
+  the two `config.GetProvider` builds are sequential, and the controllers start
+  after the peak.
+* **`GOGC=25` is the cheap win**: −129 MiB of peak and −62 MiB of steady for
+  +3.5 s. The shippable form is not the environment variable but
+  `debug.SetGCPercent(25)` before the two builds and a restore after, so the CPU
+  cost is paid once instead of forever.
+* **`GOMEMLIMIT=200MiB` is a trap on its own**: it caps the peak at 230 MiB but
+  makes startup take **56 seconds**, because the GC thrashes against the parse
+  garbage. It stops being a trap once that garbage is gone - see below.
+
+## Not parsing the blobs at all
+
+`config.NewProvider` unmarshals 19.0 MB of `schema.json` and 7.8 MB of
+`provider-metadata.yaml` before it consults any include list, once per scope.
+Reading what actually consumes them (upjet `pkg/config/provider.go:376-458`):
+
+| parsed every start | shipped | read at runtime |
+| --- | ---: | ---: |
+| `schema.json` → `resource_schemas` | 18.65 MB, 1,683 resources | **0.24 MB, 69** |
+| `schema.json` → `data_source_schemas` | 1.81 MB, 670 | **0** |
+| `provider-metadata.yaml` | 7.82 MB, 1,676 | see below |
+
+At `provider.go:436` the JSON-derived schema is **discarded and replaced by the
+Go one** for every Terraform Plugin SDK resource - 960 of the 1,029 this
+provider configures. Only the 69 Plugin Framework resources need it. A further
+654 resources in the file are unmarshalled, converted by `GetV2ResourceMap`, and
+then dropped by the include list.
+
+[`hack/clustermeasure/trim-embeds.py`](../hack/clustermeasure/trim-embeds.py)
+rewrites both files to what is actually read - 19.0 → 0.5 MB and 7.8 → 2.8 MB -
+and the provider still configures all 1,029 resources:
+
+| arm (all `disablethp`, 1,029 resources) | idle | steady | peak | config build |
+| --- | ---: | ---: | ---: | ---: |
+| control | 373.9 | 227.2 | 379.5 | 13.61 s |
+| trimmed embeds | **174.3** | 211.1 | **174.7** | 12.96 s |
+| trimmed + `GOMEMLIMIT=200MiB` | 169.9 | 188.5 | **191.7** | **12.88 s** |
+
+* **The startup peak halves, 380 → 175 MiB.** The provider now never allocates
+  more during startup than it holds afterwards.
+* **It is a peak-memory change, not a startup-time one**: 13.61 s → 12.96 s. The
+  13 seconds are `SchemaFunc()` materialisation, which is what the family filter
+  removes. The two changes are orthogonal and compose.
+* **It rescues `GOMEMLIMIT=200MiB`**, whose startup goes from 56 s to 12.9 s
+  once there is no parse garbage to thrash against.
+
+### What blocked the metadata half
+
+The first attempt panicked at startup:
+
+```
+panic: runtime error: index out of range [0] with length 0
+  config/cluster/apigatewayv2.Configure.func4  config/cluster/apigatewayv2/config.go:50
+```
+
+which is `r.MetaResource.Examples[0].SetPathValue("lifecycle", nil)`. **The
+running provider parses 2.9 MB of example manifests on every start so that a
+configurator can edit one of them for the documentation pipeline.** 368 of the
+1,676 resources have such a configurator, which is why the metadata only goes to
+2.8 MB here rather than 0.3. Guarding those configurators - or splitting the
+configurator chain into generation-time and runtime halves - is the precondition
+for dropping the metadata parse entirely.
+
+**This script is a measurement tool, not a shippable change**: `cmd/generator`
+embeds the same two files and needs them whole. Shipping it means generating a
+runtime copy at build time and selecting it by build tag.
+
+## Best of all, and it fits in 256Mi
+
+| | baseline | trim + filter + `disablethp` + `GOMEMLIMIT=200MiB` |
+| --- | ---: | ---: |
+| podMEM steady | 382.2 | **165.0** |
+| podMEM idle | 535.5 | **114.2** |
+| peak | 537.6 | **186.5** |
+| config build | 13.67 s | **0.49 s** |
+| Ready | 17 s | 4 s |
+| pod memory limit | OOMKilled at 300Mi | **runs clean at 256Mi** |
+
+−57% steady, −65% peak, −96% startup, and it schedules in half the memory.
+
+**But the lowest steady number is a different arm.** `filter + disablethp` alone
+parks at **142.4 MiB**, below the all-in-one's 165, because `GOMEMLIMIT` makes
+the scavenger target the limit rather than minimum footprint. The two goals pull
+apart:
+
+* **lowest steady metric** → filter + `disablethp`: 142.4 steady, but peak 349,
+  so the pod still needs a ~400Mi limit.
+* **smallest schedulable pod** → add the trim and `GOMEMLIMIT`: peak 187,
+  steady 165, runs in 256Mi.
+
+## Revised recommendations
+
+1. **`GODEBUG=disablethp=1`** (or nodes on `transparent_hugepage=madvise`) -
+   −47% of the reported number, no code change. Round 1.
+2. **`GOMEMLIMIT`** - not for the metric, for survival. Without it the provider
+   is OOM-killed at any limit below its startup peak; with it, it runs at 300Mi.
+   Pick it *after* the trim, or it costs 40 s of startup.
+3. **Ship the per-family include list** - startup 13.6 s → 0.5 s, and the
+   largest single cut to the steady-state number.
+4. **Stop parsing what is never read** - −200 MiB of startup peak. Downstream
+   only for the schema; the metadata needs ~368 configurators guarded first.
+5. **Reconsider `--max-reconcile-rate=100`** as a default - ~22 MiB of goroutine
+   stacks against `=10`, for a family provider that rarely needs 100.
+6. Still do not ship a one-shot `FreeOSMemory()`.
