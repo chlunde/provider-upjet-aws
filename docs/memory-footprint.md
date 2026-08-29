@@ -246,8 +246,12 @@ Worth ~103 MiB of RSS, and self-contained in this repository.
 
 ### 2. Scope terraform-provider-aws to the family's services
 
-The largest absolute win — on the order of 300 MiB of symbols — but it needs a
-change in the `upbound/terraform-provider-aws` fork.
+**MEASURED, 2026-08-28 — 864 MiB of mapped image becomes 124.8 MiB.** This was an
+estimate when written; it is now a measurement. See
+[the measurement below](#per-family-linking-measured).
+
+The largest absolute win, and it needs a change in the
+`upbound/terraform-provider-aws` fork.
 
 * `service_packages_gen.go` and `conns/awsclient_gen.go` are both generated.
   Emit build-tag-partitioned variants alongside the current full-set files, so
@@ -740,3 +744,73 @@ the one-shot first.
 Do **not** rely on `GOMEMLIMIT` for this. It does not cause release — it makes
 the scavenger target the limit rather than minimum footprint, and the idle
 samples show the limited arm reclaiming no better than the unlimited one.
+
+
+---
+
+## Per-family linking: measured
+
+Trimming the fork to one family's service closure and linking a minimal `main`
+that calls `xpprovider.GetProvider`:
+
+| | original (recorded `linkcost/tfaws`) | ec2 closure | delta |
+| --- | ---: | ---: | ---: |
+| mapped image (PT_LOAD memsz) | 864 MiB | **124.8 MiB** | **−739 MiB (−86%)** |
+| `aws-sdk-go-v2` symbols | 317.2 MiB | **31.2 MiB** | **−286 MiB (−90%)** |
+| binary file | 1.24 GB | 132.4 MB | −89% |
+
+The −286 MiB independently corroborates the ~298 MiB predicted above by
+per-service symbol arithmetic, reached by an unrelated route.
+
+**Caveat:** the baseline is the recorded `linkcost/tfaws` binary, not the same
+`cmd/sizetest` program. Both are minimal mains calling `xpprovider.GetProvider`,
+so the shapes match, but this is not a same-binary comparison — an identical
+baseline needs ~20 GB of transient build space.
+
+### Correcting what roots the SDK
+
+[`ideas.md`](ideas.md) §I2 says the SDK is rooted by `*conns.AWSClient`'s method
+set rather than by `servicePackages()`. **That is backwards.** Two generated files
+root it:
+
+* `internal/provider/sdkv2/service_packages_gen.go:282` — `servicePackages(ctx)`
+  is a flat slice literal of **267** `<svc>.ServicePackage(ctx)` calls, invoked
+  unconditionally at `provider.go:308`, which is exactly where
+  `xpprovider.GetProvider` → `provider.NewProvider(ctx)` lands.
+* `internal/conns/awsclient_gen.go` — 266 typed accessors whose **import list**
+  pulls every service package's `init`.
+
+The method set is a consequence. Both are generated files, so this is a codegen
+change rather than an architectural one — materially easier than §I2 implies.
+
+### The closure is invisible to the import graph
+
+`go list -deps` **understates** it, so the generator cannot use it.
+`organizations/account.go` calls `meta.(*conns.AWSClient).AccountClient(ctx)`
+while importing nothing from `account` — only `conns` imports it. The closure has
+to be computed by walking `*Client(ctx)` call sites across the service tree to a
+fixpoint, mapping method name → package via `awsclient_gen.go`. That is ~20 lines,
+and getting it wrong fails the build rather than shipping something subtly broken.
+
+**True EC2 closure: 5 of 267** — `account`, `ec2`, `organizations`, `s3`,
+`s3control`. `s3`/`s3control` are a fixed floor forced by `conns` itself
+(`awsclient.go:265` hardcodes `c.S3Client`), not by EC2.
+
+### The linked floor is larger than the closure
+
+The trimmed binary links **16** service clients, not 5: beyond the closure it
+carries `sts`, `sso`, `ssooidc`, `signin`, `iam`, `dynamodb`, `sns`, `sqs`,
+`apigatewayv2`, `resourcegroupstaggingapi`, pulled in by `conns`/`awsbase`
+authentication and shared plumbing. Still 16 of 267, but a generator author should
+expect it.
+
+### Relation to the AWS SDK codegen patches
+
+Independent and additive, but not comparable in size. Per-family linking is worth
+~286 MiB of SDK symbols and lives entirely inside the Upbound fork. The
+error-deserializer refactor (revalidated separately, still applies to upstream
+HEAD, still not upstreamed) is worth −9.6% of `deserializers.go` in whichever
+services survive the trim — on a 5-service binary, a small slice of an already
+small number.
+
+**Per-family linking is the dominant term and needs nothing from upstream AWS.**
