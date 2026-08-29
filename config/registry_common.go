@@ -6,6 +6,8 @@ package config
 
 import (
 	_ "embed"
+	"os"
+	"strings"
 
 	"github.com/crossplane/upjet/v2/pkg/config"
 	conversiontfjson "github.com/crossplane/upjet/v2/pkg/types/conversion/tfjson"
@@ -72,7 +74,7 @@ func CLIReconciledResourceList() []string {
 		l[i] = name + "$"
 		i++
 	}
-	return l
+	return filterToFamily(l)
 }
 
 // TerraformPluginSDKResourceList returns the list of resources that have external
@@ -86,7 +88,7 @@ func TerraformPluginSDKResourceList() []string {
 		l[i] = name + "$"
 		i++
 	}
-	return l
+	return filterToFamily(l)
 }
 
 func TerraformPluginFrameworkResourceList() []string {
@@ -97,7 +99,7 @@ func TerraformPluginFrameworkResourceList() []string {
 		l[i] = name + "$"
 		i++
 	}
-	return l
+	return filterToFamily(l)
 }
 
 // dropCodegenOnlyMetadata releases the Terraform registry metadata (resource
@@ -112,4 +114,51 @@ func dropCodegenOnlyMetadata(pc *config.Provider) {
 	for _, r := range pc.Resources {
 		r.MetaResource = nil
 	}
+}
+
+// familyFilterEnv names the environment variable that restricts the include
+// lists this provider hands to upjet's config.NewProvider to one or more API
+// short groups (comma separated), e.g. UPJET_FAMILY_FILTER=s3.
+//
+// It is deliberately inert unless the variable is set, so one binary can serve
+// both arms of a measurement.
+const familyFilterEnv = "UPJET_FAMILY_FILTER"
+
+// shortGroupOf returns the API short group that would be assigned to the given
+// Terraform resource name, computed statically from the name alone. It mirrors
+// upjet's config.DefaultResource default (the second word of the resource name,
+// or the first when the name has fewer than three words) as overridden by this
+// repository's GroupMap.
+func shortGroupOf(resource string) string {
+	if f, ok := GroupMap[resource]; ok {
+		g, _ := f(resource)
+		return g
+	}
+	words := strings.Split(resource, "_")
+	if len(words) < 3 {
+		return words[0]
+	}
+	return words[1]
+}
+
+// filterToFamily drops from an include list every entry whose API short group
+// is not named by familyFilterEnv.
+func filterToFamily(l []string) []string {
+	v := os.Getenv(familyFilterEnv)
+	if v == "" {
+		return l
+	}
+	keep := map[string]bool{}
+	for _, g := range strings.Split(v, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			keep[g] = true
+		}
+	}
+	out := make([]string, 0, len(l))
+	for _, e := range l {
+		if keep[shortGroupOf(strings.TrimSuffix(e, "$"))] {
+			out = append(out, e)
+		}
+	}
+	return out
 }

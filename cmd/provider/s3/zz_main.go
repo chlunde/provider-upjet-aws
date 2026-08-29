@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	rundebug "runtime/debug"
 	"time"
 
 	"github.com/alecthomas/kingpin/v2"
@@ -71,6 +72,8 @@ func deprecationAction(flagName string) kingpin.Action {
 		return nil
 	}
 }
+
+var processStart = time.Now()
 
 func init() {
 	err := bootcheck.CheckEnv()
@@ -223,6 +226,12 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	kingpin.FatalIfError(err, "Cannot initialize the cluster provider configuration")
 	namespacedProvider, err := config.GetProviderNamespaced(ctx, fwProvider, sdkProvider, false, *skipDefaultTags)
 	kingpin.FatalIfError(err, "Cannot initialize the namespaced provider configuration")
+	logr.Info("provider configuration built", "sinceStart", time.Since(processStart).String(), "clusterResources", len(clusterProvider.Resources), "namespacedResources", len(namespacedProvider.Resources))
+	if os.Getenv("UPJET_SCAVENGE_AFTER_STARTUP") == "1" {
+		t := time.Now()
+		rundebug.FreeOSMemory()
+		logr.Info("released startup heap", "took", time.Since(t).String())
+	}
 
 	clusterSetupConfig := &clients.SetupConfig{
 		Logger:            logr,
