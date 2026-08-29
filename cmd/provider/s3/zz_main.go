@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
 	rundebug "runtime/debug"
@@ -226,6 +228,11 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	kingpin.FatalIfError(err, "Cannot initialize the cluster provider configuration")
 	namespacedProvider, err := config.GetProviderNamespaced(ctx, fwProvider, sdkProvider, false, *skipDefaultTags)
 	kingpin.FatalIfError(err, "Cannot initialize the namespaced provider configuration")
+	if addr := os.Getenv("UPJET_PPROF_ADDR"); addr != "" {
+		go func() {
+			logr.Info("pprof listening", "addr", addr, "err", http.ListenAndServe(addr, nil))
+		}()
+	}
 	logr.Info("provider configuration built", "sinceStart", time.Since(processStart).String(), "clusterResources", len(clusterProvider.Resources), "namespacedResources", len(namespacedProvider.Resources))
 	if os.Getenv("UPJET_SCAVENGE_AFTER_STARTUP") == "1" {
 		t := time.Now()
