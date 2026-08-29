@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mem
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  namespace: mem
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: localstack}
+  template:
+    metadata:
+      labels: {app: localstack}
+    spec:
+      containers:
+      - name: localstack
+        image: localstack/localstack:4
+        env:
+        - name: SERVICES
+          value: s3,sts,iam
+        - name: DEBUG
+          value: "0"
+        - name: EAGER_SERVICE_LOADING
+          value: "1"
+        ports:
+        - containerPort: 4566
+        readinessProbe:
+          httpGet: {path: /_localstack/health, port: 4566}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests: {memory: 256Mi, cpu: 100m}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+  namespace: mem
+spec:
+  selector: {app: localstack}
+  ports:
+  - port: 4566
+    targetPort: 4566

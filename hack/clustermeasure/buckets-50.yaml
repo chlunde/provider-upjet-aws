@@ -1,0 +1,550 @@
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-000
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-001
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-002
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-003
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-004
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-005
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-006
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-007
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-008
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-009
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-010
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-011
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-012
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-013
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-014
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-015
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-016
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-017
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-018
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-019
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-020
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-021
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-022
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-023
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-024
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-025
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-026
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-027
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-028
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-029
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-030
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-031
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-032
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-033
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-034
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-035
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-036
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-037
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-038
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-039
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-040
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-041
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-042
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-043
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-044
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-045
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-046
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-047
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-048
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
+---
+apiVersion: s3.aws.upbound.io/v1beta1
+kind: Bucket
+metadata:
+  name: memtest-049
+spec:
+  forProvider:
+    region: us-east-1
+    forceDestroy: true
+  providerConfigRef:
+    name: default
