@@ -156,7 +156,9 @@ lock. Both are now outside it.
 `internal/clients` transitively imports terraform-provider-aws, so `-race`
 rebuilds every dependency; two attempts exhausted the disk before linking. The
 race was demonstrated in a dependency-free side module, but that scratch module
-was deleted during disk recovery and the result can no longer be audited. What
+is committed as `hack/memprofile/leadcheck/race_test.go` and still reproduces
+(`LEADCHECK_RACE=1 go test -race ./hack/memprofile/leadcheck/`). An earlier note
+here claimed it had been deleted during disk recovery; that was wrong. What
 *is* confirmed here: `go build` and `go test` (without `-race`) pass on the
 package, and the regression test is well formed — 500 rounds of 32 goroutines
 released together against a deliberately stale entry, so every goroutine takes

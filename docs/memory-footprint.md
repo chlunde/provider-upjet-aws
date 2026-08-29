@@ -31,7 +31,7 @@ reports:
 
 Neither half is the live object graph. The first half is code the family binary
 links but never runs; the second is arena grown to absorb the garbage thrown off
-while parsing 22 MB of embedded JSON and YAML into 1,029 resource
+while parsing 26.8 MB of embedded JSON and YAML into 1,029 resource
 configurations, twice.
 
 That is why safe-start does not help. Safe-start gates *controller startup* on
@@ -191,11 +191,11 @@ packages and `internal/conns/awsclient_gen.go` imports all 266
 `config.GetProvider` and `config.GetProviderNamespaced` each call upjet's
 `config.NewProvider`, which:
 
-* unmarshals the embedded `config/schema.json` (14.7 MB) and converts **every**
+* unmarshals the embedded `config/schema.json` (19.0 MB) and converts **every**
   resource schema to the plugin-SDK representation, even though the comment on
   `GetV2ResourceMap` says those are "not utilized during runtime, just for
   facilitating CRD generation";
-* parses the embedded `config/provider-metadata.yaml` (7.3 MB) of scraped docs
+* parses the embedded `config/provider-metadata.yaml` (7.8 MB) of scraped docs
   and examples and attaches it to every resource as `MetaResource`;
 * builds a `config.Resource` for all **1,029** configured resources, calling
   `SchemaFunc()` on each — which defeats the laziness terraform-provider-aws
@@ -217,7 +217,7 @@ Note that `CLIReconciledExternalNameConfigs` is empty for AWS: no resource is
 reconciled through the Terraform CLI. For plugin-SDK resources
 `NewProvider` overwrites the JSON-derived schema with the Go one from
 `p.TerraformProvider.ResourcesMap[name]`, and the runtime only ever reads that
-Go schema (`pkg/controller/external_tfpluginsdk.go`). The 14.7 MB embedded JSON
+Go schema (`pkg/controller/external_tfpluginsdk.go`). The 19.0 MB embedded JSON
 schema is, at runtime, used for nothing but enumerating resource names.
 
 ## What it would take
@@ -572,7 +572,37 @@ naming that resource.
 
 ---
 
-## The largest win, and it was missed for most of this investigation
+## ~~The largest win, and it was missed for most of this investigation~~ — RETRACTED
+
+> # RETRACTED — everything from here to the end of this document is false
+>
+> The four sections below ("The largest win…", "`GOMEMLIMIT` is likely *causing*…",
+> "Steady state: the background scavenger does not do this for you", and
+> "Recommended fix shape") rest on the claim that Go's background scavenger does
+> not return the idle heap unprompted. **It does** — within ~2.5 minutes idle and
+> ~15 seconds under load, triggered at the forced-GC boundary. Confirmed in a
+> minimal repro: `HeapReleased` jumps 3.2 → 1603.2 MiB the instant `NumGC` ticks
+> at 2m15s.
+>
+> The evidence offered below for "it does not come back" was an idle sampling of
+> two processes **that had already been scavenged explicitly** — the control had
+> nothing left to return, so its flatness proved nothing.
+>
+> An explicit `debug.FreeOSMemory()` buys **7–10 MiB and closes a ~2.5-minute
+> startup window**, not 180–255 MiB. `GOMEMLIMIT` does **not** prevent release (a
+> limited process parks *lower* than an unlimited one); what it genuinely does is
+> cap the arena and lower the startup high-water mark. A periodic ticker is
+> pointless — the workload returns to the plateau within 15 s.
+>
+> Full retraction, with the 15-run matrix and raw logs:
+> [`docs/fixes/23-release-startup-heap.md`](fixes/23-release-startup-heap.md).
+> The sections are left in place rather than deleted so the error is legible.
+>
+> **The original question — why a real pod sits at ~300 MB — is open again.** The
+> proxy workload has no growing live set, so it never modelled
+> controller-runtime's informer cache, client-go, the workqueue, or the AWS SDK
+> request cycle. That is where to look.
+
 
 **~180–255 MiB of the anonymous footprint is idle heap the runtime is holding
 but not using, and `debug.FreeOSMemory()` returns it in 58 ms.**
