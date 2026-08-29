@@ -16,6 +16,18 @@ All numbers below were produced with the harness in
 [`hack/memprofile`](../hack/memprofile/README.md) against this tree, on
 linux/amd64, `go build` with the repo's default flags.
 
+> **Read [`cluster-measurement.md`](cluster-measurement.md) alongside this.** Every
+> figure here is a `/proc/self/smaps_rollup` or `runtime.MemStats` reading taken
+> from a process that links the provider's packages. Measured on an actual pod,
+> through the cgroup Kubernetes charges, three of the conclusions below move:
+> transparent huge pages, not the Go heap, dominate what the pod reports
+> (−47% from `GODEBUG=disablethp=1` alone); `debug.FreeOSMemory()` is worth
+> −120 MiB to a pod against the −219 MiB it shows here; and `smaps` Anonymous
+> varies by 175 MiB between two identical runs whose pod metric differs by 6 MiB.
+> The startup finding and the per-family include list both hold, and the include
+> list is worth *more* to a pod (−20% steady, −20% peak) than the correction
+> below concluded.
+
 ## Summary
 
 Resident memory has two roughly equal halves, and they need different fixes.
