@@ -814,3 +814,92 @@ services survive the trim — on a 5-service binary, a small slice of an already
 small number.
 
 **Per-family linking is the dominant term and needs nothing from upstream AWS.**
+
+---
+
+## The change can be additive: accessors do not root at link time
+
+**Correction to the section above.** It states that both generated files must be
+trimmed. That was inferred from watching `service/backup` be *compiled* with only
+the registry trimmed — but compilation is not linking, and the question is what
+reaches the binary.
+
+Tested directly with a synthetic program: a struct with two typed accessors,
+`BackupClient` and `STSClient`, where only `STSClient` is ever called.
+
+```
+backup (accessor never called): 0.01 MiB, zero operation symbols (ListBackupJobs: 0 hits)
+sts    (accessor called):       0.02 MiB, linked normally
+```
+
+An uncalled typed accessor **does not root its package**. The linker drops the
+method as unreachable and the SDK client package with it.
+
+**Therefore `internal/conns/awsclient_gen.go` does not need to change.** Its 266
+accessors cost *compile* time only. The sole link-time root is
+`servicePackages()`, reached from `provider.NewProvider` at `provider.go:308`.
+
+This separates the two concerns cleanly:
+
+* **image size** — a small, tag-gated change to one generated registry file;
+* **compile time and build disk** — unaffected by the above, and addressed only
+  by the AWS SDK codegen work upstream (`aws/smithy-go`, `aws/aws-sdk-go-v2`).
+
+**Unverified:** the mechanism is proven synthetically; the *result* on the real
+provider is not. The 132.4 MB figure came from trimming both files. Whether
+registry-only reaches the same number needs one full link (~20 GB transient),
+which did not fit in the analysis environment. **Measure this before proposing
+anything.**
+
+## Three designs, ranked by conflict surface
+
+The fork's most valuable property is that it is **105 lines across 2 new files**
+(`xpprovider/xpprovider.go` 76, `internal/conns/awsclient_xp.go` 29) with **zero
+edits to upstream-owned code** — which is why it rebases effortlessly against a
+repo that regenerates every release. Any proposal should try to preserve that.
+
+1. **Pure additive, zero edits.** New `internal/provider/sdkv2/provider_scoped.go`
+   duplicating `NewProvider` (281 lines, mostly a schema literal) but taking an
+   injected `[]conns.ServicePackage`; new `xpprovider.GetProviderForServices(...)`;
+   build-tagged new files carrying each family's list. Perfect additive property.
+   Cost: 281 duplicated lines that must track upstream **silently** — drift
+   produces no merge conflict. Mitigate with a test asserting both constructors
+   yield identical providers for the full service set.
+
+2. **One build-tag line — recommended.** Add `//go:build !xp_scoped` to
+   `service_packages_gen.go`; ship a new `service_packages_scoped_gen.go` under
+   `//go:build xp_scoped` with the trimmed list. A single comment line in one
+   upstream-owned file, plus new files. No duplication of `NewProvider`. The
+   failure mode is **loud**: if regeneration drops the tag, duplicate
+   `servicePackages` definitions fail the compile rather than silently reverting.
+   The line can be stamped by a build step after `go generate`, leaving the repo
+   carrying only new files plus a Makefile addition.
+
+3. **Full generator patch** — patch `internal/generate/servicepackages/main.go`
+   (and `awsclient/main.go` if ever needed). Largest surface; only worth it if
+   this becomes a first-class upstream feature.
+
+## Framing for maintainers
+
+**Pitch image size, not memory.** The ~286 MiB of SDK symbols is clean,
+file-backed; `container_memory_working_set_bytes` subtracts it as those pages age
+out. A memory framing invites a correct rebuttal. The defensible argument is
+**178 published images at ~1.2 GB each**, with a measured path to ~130 MB —
+registry storage, pull latency per node, image GC pressure.
+
+**Ask for a decision, not a merge.** A drive-by PR making the first-ever edits to
+IBM-maintained generators asks maintainers to accept a permanent rebase tax on a
+stranger's measurement. An issue carrying the measurement, the reproduction, the
+honest maintenance cost, and the question "would you take this?" is far more
+likely to get a reply.
+
+**Disclose the sharp edges yourself:** the closure is invisible to `go list -deps`
+(services reach each other through `AWSClient` methods, so `organizations` needs
+`account`); the linked floor is 16 service clients, not the 5 in the closure; and
+a client reached by interface dispatch or reflection would fail at **runtime** in
+a trimmed binary rather than at build time. That last is the only genuine
+correctness risk, and naming it is what makes the rest credible.
+
+**`go build -overlay` is not an escape hatch** — it explicitly cannot replace
+files beneath `GOMODCACHE`, so the trim cannot be driven from provider-upjet-aws
+without vendoring the fork or a `replace` to a local checkout.
