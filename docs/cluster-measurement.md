@@ -518,3 +518,98 @@ hoisting the shared partitions table into one package or compiling it lazily.
 | peak | 537.6 | **126.3** |
 | config build | 13.67 s | **0.25 s** |
 | pod limit | OOMKilled at 300Mi | runs at 256Mi |
+
+
+---
+
+# Round 4: the AWS SDK patch, and where the last 8 MiB came from
+
+Round 3 established that the footprint is live heap x (1 + GOGC/100) plus stacks,
+metadata and fragmentation - so the only thing that moves it is live heap. The
+largest addressable item in the live heap of a filtered, trimmed provider was
+7-11 MiB of retained compiled regexes. This round finds out where they come from
+and removes them.
+
+## Where the retained regexes come from
+
+`inuse_space`, peeking at `regexp.MustCompile`: a long tail of
+`<service>/internal/endpoints.init`. Every generated
+`aws-sdk-go-v2/service/*/internal/endpoints/endpoints.go` compiles **the same
+eight partition region matchers** at package init:
+
+```go
+Aws:      regexp.MustCompile("^(us|eu|ap|sa|ca|me|af|il|mx)\\-\\w+\\-\\d+$"),
+AwsCn:    regexp.MustCompile("^cn\\-\\w+\\-\\d+$"),
+AwsUsGov: regexp.MustCompile("^us\\-gov\\-\\w+\\-\\d+$"),   // + iso, isob, isoe, isof, eusc
+```
+
+Byte-identical in 60 of 60 service packages sampled. A provider linking 269
+services **compiles 2,152 regexes to represent 8**, at init, whether or not the
+service is ever used.
+
+The fix has a home already: `go list -deps` on two service clients gives 48
+shared `aws-sdk-go-v2` + `smithy-go` packages against three per-service ones, and
+the shared set includes `internal/endpoints/v2` - which defines the
+`endpoints.Partitions` type the per-service tables instantiate. Hoisting the
+compiled patterns there adds **no new dependency edge**.
+
+## Measured
+
+Applied mechanically in a vendored tree: eight shared vars added to
+`internal/endpoints/v2`, and every `regexp.MustCompile("<pattern>")` in the
+service endpoint files replaced with a reference. **2,144 calls removed across
+268 of 268 files**; the per-service region overrides and `*regexp.Regexp` struct
+fields stay, so no import changed and the binary grew by 131 KB.
+
+Same cluster, same arm (trimmed embeds + family filter + `disablethp` +
+`GOGC=25`), one variable changed, n=2:
+
+| | retained regexes | live heap | idle | steady | peak |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 6.51 | 64.7 | 98.2 | 119.3 | 142.4 |
+| after | **3.03** | **56.2** | 90.7 / 90.3 | **110.5 / 108.8** | 133.0 / 129.8 |
+
+**-8.6 MiB of what Kubernetes charges the pod, -7%, reproducibly.** The
+per-service `endpoints.init` tail is gone from the profile; what still compiles
+regexes is `regexache` (terraform-provider-aws's own, 2.02 MiB), `go-cmp.init`
+and `hc-install.init`.
+
+This is also the second half of the round-1 correction: per-family *linking* of
+the fork removes the same cost without waiting for upstream, because an unlinked
+service package runs no `init`.
+
+## Best measured configuration
+
+| | stock | best |
+| --- | ---: | ---: |
+| podMEM steady | 382.2 | **108.4** |
+| podMEM idle | 535.5 | **89.9** |
+| peak | 537.6 | **115.0** |
+| config build | 13.67 s | 0.66 s (0.25 s with the upjet patch) |
+| smallest pod | OOMKilled at 300Mi | 256Mi, 0 restarts |
+
+That is: SDK partition regexes hoisted + trimmed embeds + `UPJET_FAMILY_FILTER` +
+`GODEBUG=disablethp=1` + `GOGC=25` + `GOMEMLIMIT=120MiB`. **-72% steady, -79%
+peak.**
+
+Note the two patches have not yet been combined in one binary: the upjet regex
+precompile (round 3, startup) and the SDK partition hoist (round 4, memory) were
+built separately. They are independent, so a combined build should give 0.25 s
+config build at 108 MiB steady.
+
+## What remains, to get under 100
+
+Live heap is now 56.2 MiB:
+
+| | |
+| --- | ---: |
+| `Scheme.AddKnownTypeWithName` + conversion funcs + RESTMapper (8,488 GVKs) | ~14 MiB |
+| `reflect.compiledTypelinks` / `addModuleItabs` / `addReflectOff` | ~6 MiB |
+| Terraform provider resource map | ~7 MiB |
+| remaining regexes (`regexache`, go-cmp, hc-install) | ~3 MiB |
+| diffuse remainder | ~26 MiB |
+
+The first two - ~20 MiB - exist only because a single-family binary links every
+API group. **Per-family API packages are now the single largest remaining item**,
+and at `GOGC=25` that ~20 MiB of live heap is ~25 MiB of pod memory, which lands
+the steady state in the mid-80s. Nothing else measured gets under 100.
