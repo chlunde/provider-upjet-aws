@@ -204,10 +204,10 @@
 <header class="masthead">
   <p class="eyebrow">provider-upjet-aws &middot; s3 family &middot; kind + LocalStack &middot; 29 Aug 2026</p>
   <h1>The provider pod's 380&nbsp;MB</h1>
-  <p class="standfirst">Twenty-six arms of one binary, measured through the cgroup Kubernetes
-  actually bills. The biggest single lever turned out to be a kernel setting nobody had looked at.
-  The second was not parsing 26&nbsp;MB of embedded data that the running provider reads 0.35&nbsp;MB
-  of. Together they take a pod that is OOM-killed at 300Mi and fit it in 256Mi.</p>
+  <p class="standfirst">Forty arms, four rounds, measured through the cgroup Kubernetes actually
+  bills. The biggest lever was a kernel setting nobody had looked at. The second was not parsing
+  26&nbsp;MB of embedded data that the running provider reads 0.35&nbsp;MB of. The third was eight
+  regular expressions compiled 269 times. 382&nbsp;MiB became 108.</p>
 
   <div class="readout">
     <div>
@@ -522,7 +522,77 @@ makes the peak slightly worse (438 against 395). There is nothing concurrent to 
 two provider builds are sequential and the controllers start after the peak.</p>
 </div>
 
-<h2>08 / What to do</h2>
+
+<h2>08 / Rounds three and four</h2>
+<p class="h2sub">The profile's top three moved nothing. Eight regexes moved 8 MiB.</p>
+
+<div class="col">
+<p>With huge pages, the filter and the trim applied, steady state sat at 119&nbsp;MiB. An
+<code>alloc_space</code> profile named three obvious culprits, so all three were implemented:
+upjet's <code>config.matches</code> recompiling every include-list pattern (<strong>575&nbsp;MB,
+32% of all allocation</strong>), clearing <code>SchemaFunc</code> so the schema stops being rebuilt
+on every Observe, and <code>--poll-state-metric</code> at 30&nbsp;s instead of 5.</p>
+</div>
+
+<div class="tablewrap" style="margin: 24px 0 8px; max-width: 720px;">
+<table>
+  <thead><tr><th>arm</th><th>steady</th><th>config build</th></tr></thead>
+  <tbody>
+    <tr><td>control</td><td>119.3</td><td>688 ms</td></tr>
+    <tr><td>+ regex precompile</td><td class="neu">118.4</td><td class="pos">250 ms</td></tr>
+    <tr><td>+ clear SchemaFunc</td><td class="neu">118.9</td><td>236 ms</td></tr>
+    <tr><td>+ poll-state-metric 30s</td><td class="neu">119.6</td><td>253 ms</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout col">
+  <span class="label">The result worth keeping</span>
+  <p>Every memory delta is inside noise. Footprint is <strong>live heap &times; (1 + GOGC/100)</strong>
+  plus stacks, GC metadata and fragmentation &mdash; garbage the collector keeps up with never becomes
+  resident. <strong>An <code>alloc_space</code> profile ranks what to fix for speed;
+  <code>inuse_space</code> ranks what to fix for footprint.</strong> The regex patch is still a 2.7&times;
+  startup win (and &minus;5.5&nbsp;s on an unfiltered provider), and clearing <code>SchemaFunc</code> is a
+  correctness fix. Neither is a memory fix.</p>
+</div>
+
+<div class="col">
+<p>So the target became live heap, whose largest addressable item was 7&ndash;11&nbsp;MiB of retained
+compiled regexes. They turned out to be the AWS SDK's <strong>partition region matchers</strong>: every
+generated <code>service/*/internal/endpoints</code> package compiles the same eight patterns at init,
+byte-identical in 60 of 60 packages sampled. A provider linking 269 services <strong>compiles 2,152
+regexes to represent 8</strong>.</p>
+
+<p>They were hoisted into <code>internal/endpoints/v2</code> &mdash; which every one of those files
+already imports, so the change adds no dependency edge. 2,144 calls removed across 268 of 268 files;
+the binary grew 131&nbsp;KB.</p>
+</div>
+
+<div class="tablewrap" style="margin: 24px 0 8px; max-width: 800px;">
+<table>
+  <thead><tr><th></th><th>retained regexes</th><th>live heap</th><th>idle</th><th>steady</th><th>peak</th></tr></thead>
+  <tbody>
+    <tr><td>before</td><td>6.51</td><td>64.7</td><td>98.2</td><td>119.3</td><td>142.4</td></tr>
+    <tr class="hi"><td>after (n=2)</td><td class="pos">3.03</td><td class="pos">56.2</td><td>90.7 / 90.3</td><td class="pos">110.5 / 108.8</td><td>133.0 / 129.8</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="col">
+<p>That is also the second half of a correction: round&nbsp;1 said per-family linking of the fork
+could not move the pod metric because the code it removes is file-backed. An unlinked service package
+runs no <code>init</code>, so it removes this too.</p>
+
+<h3>Where the last 56 MiB is</h3>
+<p>Of the live heap that remains, ~14&nbsp;MiB is <code>Scheme.AddKnownTypeWithName</code> plus
+conversion funcs and the RESTMapper for all 8,488 GVKs, and ~6&nbsp;MiB is
+<code>reflect.compiledTypelinks</code> and friends. Both exist only because a single-family binary
+links every API group. <strong>Per-family API packages are the single largest remaining item</strong>,
+worth ~20&nbsp;MiB of live heap &mdash; about 25&nbsp;MiB of pod memory at <code>GOGC=25</code>, which
+is what would put steady state in the mid-80s. Nothing else measured gets under 100.</p>
+</div>
+
+<h2>09 / What to do</h2>
 <p class="h2sub">Ranked by measured effect on the pod metric</p>
 
 <ol class="rec">
@@ -538,6 +608,12 @@ two provider builds are sequential and the controllers start after the peak.</p>
     <span class="rd">Without it the provider is OOM-killed at any limit below its startup peak; with
     it, it runs at 300Mi. Apply it <em>after</em> the trim, or it costs 40 s of startup.</span>
     <span class="rm">OOMKilled &rarr; 0 restarts at 300Mi</span>
+  </li>
+  <li>
+    <span class="rt">Share the AWS SDK's partition regexes</span>
+    <span class="rd">Hoist the eight partition matchers into <code>internal/endpoints/v2</code>,
+    which every service endpoint file already imports. Codegen-only, upstream, no new dependency.</span>
+    <span class="rm">&minus;8.6 MiB on the pod &middot; 2,152 &rarr; 8 compiles</span>
   </li>
   <li>
     <span class="rt">Ship the per-family include list</span>
@@ -558,6 +634,12 @@ two provider builds are sequential and the controllers start after the peak.</p>
     not free.</span>
     <span class="rm">~22 MiB of goroutine stacks</span>
   </li>
+  <li>
+    <span class="rt">Per-family API packages &mdash; the last big one</span>
+    <span class="rd">The 8,488-GVK scheme, its conversion funcs and RESTMapper, plus the reflect
+    metadata that follows. Real codegen work, and the only measured path under 100 MiB.</span>
+    <span class="rm">~20 MiB of live heap &middot; ~25 MiB of pod memory</span>
+  </li>
   <li class="no">
     <span class="rt">Do not ship a one-shot <code>FreeOSMemory()</code></span>
     <span class="rd">Already retracted; the cluster confirms it changes no steady-state number.</span>
@@ -565,7 +647,7 @@ two provider builds are sequential and the controllers start after the peak.</p>
   </li>
 </ol>
 
-<h2>09 / Scope</h2>
+<h2>10 / Scope</h2>
 <p class="h2sub">What this does not cover</p>
 
 <div class="col">
