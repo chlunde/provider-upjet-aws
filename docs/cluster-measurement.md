@@ -404,3 +404,117 @@ apart:
 5. **Reconsider `--max-reconcile-rate=100`** as a default - ~22 MiB of goroutine
    stacks against `=10`, for a family provider that rarely needs 100.
 6. Still do not ship a one-shot `FreeOSMemory()`.
+
+
+---
+
+# Round 3: implementing the profile's top three, and finding out they do not matter
+
+Round 2 ended at 113-119 MiB steady with environment variables only. This round
+implements the three largest allocation sites a profile identifies and measures
+whether they move the pod metric. **They do not**, and that is the result worth
+recording.
+
+## What was implemented
+
+1. **upjet `config.matches` precompiles its patterns.** `regexp.MatchString`
+   compiles its pattern on every call, and `NewProvider` calls `matches` for
+   every resource in the schema against every include-list entry. Patch:
+   [`hack/clustermeasure/upjet-precompile-matches.patch`](../hack/clustermeasure/upjet-precompile-matches.patch).
+2. **`UPJET_CLEAR_SCHEMAFUNC=1`** drops `SchemaFunc` on every resource whose
+   `Schema` upjet has already materialised, so `helper/schema.Resource.SchemaMap`
+   returns the cached map instead of rebuilding it - `docs/fixes/02`, implemented
+   downstream in `config/registry_common.go`.
+3. **`--poll-state-metric=30s`** instead of the 5 s default.
+
+## What the profile said they were worth
+
+`alloc_space`, filtered and trimmed provider, process start to steady state:
+
+| site | allocated | share |
+| --- | ---: | ---: |
+| `config.matches` -> `regexp.MatchString` | **575.6 MB** | 32% |
+| `schemaMap.DeepCopy` -> `copystructure`/`reflectwalk` | 211 MB | 12% |
+| `Resource.SchemaMap` -> `SchemaFunc()` | 65 MB | 4% |
+
+and per 3.3 minutes of *steady* reconciliation (50 MRs, poll 1m), 835 MB total:
+
+| site | allocated | share |
+| --- | ---: | ---: |
+| `schemaMapWithIdentity.DeepCopy` | 168 MB | 20% |
+| `bufio.NewReaderSize` <- `http.Transport.dialConn` | 56 MB | 7% |
+| `Resource.SchemaMap` -> `resourceBucket.func2` | 49 MB | 6% |
+| `prometheus.Registry.Gather` | 64 MB | 8% |
+
+## What they were actually worth
+
+All arms: trimmed embeds + family filter + `disablethp` + `GOGC=25`, 50 MRs.
+
+| arm | idle | steady | peak | config build |
+| --- | ---: | ---: | ---: | ---: |
+| control (round 2 binary) | 98.2 | 119.3 | 142.4 | 688 ms |
+| + regex precompile | 96.9 | **118.4** | 141.4 | **250 ms** |
+| + clear `SchemaFunc` | 98.6 | **118.9** | 137.9 | 236 ms |
+| + `--poll-state-metric=30s` | 98.0 | **119.6** | 138.8 | 253 ms |
+
+**Every memory delta is inside noise.** The one real change is wall clock: the
+config build goes from 688 ms to 250 ms, **2.7x faster**, from the regex patch
+alone.
+
+### Why
+
+The pod's footprint is
+
+> live heap x (1 + GOGC/100) + goroutine stacks + GC metadata + span fragmentation
+
+Garbage the collector keeps up with never becomes resident. At `GOGC=25` the heap
+goal is 1.25x the *live* set, so removing 575 MB of short-lived allocation
+removes CPU and GC pressure and nothing else. **An `alloc_space` profile ranks
+what to fix for speed; it does not rank what to fix for footprint.** The two
+questions need different profiles - and `inuse_space` is the one that answers
+this document's question.
+
+This does not make the fixes worthless. The regex patch is a 2.7x startup win for
+every upjet provider. Clearing `SchemaFunc` is a **correctness** fix as well: this
+repository's `config/` schema edits are written to `.Schema`, which only the diff
+path reads, so everything reached through `SchemaMap()` sees the unedited upstream
+schema (`docs/fixes/02-clear-schemafunc.md`). They are simply not memory fixes,
+and proposing them as such would not survive review.
+
+## So what is left, to get under 100
+
+The live heap of a filtered, trimmed provider is **64.7 MiB**:
+
+| | |
+| --- | ---: |
+| `Scheme.AddKnownTypeWithName` + conversion funcs + RESTMapper (8,488 GVKs) | ~14 MiB |
+| retained compiled regexes | ~7-11 MiB |
+| `reflect.compiledTypelinks` / `addModuleItabs` / `addReflectOff` | ~6 MiB |
+| Terraform provider resource map | ~7 MiB |
+| diffuse remainder | ~27 MiB |
+
+The first three are consequences of **linking every API group and every AWS SDK
+service into a single-family binary**. So the two structural changes already on
+the list - per-family API packages, and per-family linking of the fork - are the
+only remaining levers, and they are worth roughly 20-25 MiB of live heap, i.e.
+25-30 MiB of pod memory at `GOGC=25`. That is what lands under 100.
+
+### A correction to §6 of round 1
+
+Round 1 said per-family linking cannot move the pod metric because the code it
+removes is file-backed. **That is wrong in one respect.** Every linked
+`aws-sdk-go-v2/service/*/internal/endpoints` package compiles the same eight
+partition-region regexes at package init - byte-identical in 60 of 60 packages
+sampled - so a binary linking 269 services compiles **2,152 regexes for 8
+patterns** and retains **6.51 MiB of heap**, 10-12% of this provider's live set.
+Per-family linking removes that too, and it is fixable upstream on its own by
+hoisting the shared partitions table into one package or compiling it lazily.
+
+## Best measured, end to end
+
+| | stock | best |
+| --- | ---: | ---: |
+| steady | 382.2 | **113.4** (`GOMEMLIMIT=120MiB`) |
+| peak | 537.6 | **126.3** |
+| config build | 13.67 s | **0.25 s** |
+| pod limit | OOMKilled at 300Mi | runs at 256Mi |

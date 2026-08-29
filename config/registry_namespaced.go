@@ -86,6 +86,9 @@ func GetProviderNamespaced(ctx context.Context, fwProvider fwprovider.Provider, 
 	if !generationProvider {
 		dropCodegenOnlyMetadata(pc)
 	}
+	if !generationProvider {
+		clearMaterialisedSchemaFuncs(pc)
+	}
 	return pc, nil
 }
 

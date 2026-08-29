@@ -1,0 +1,50 @@
+# Precompile the include/skip list patterns in upjet's matches().
+# Apply to github.com/crossplane/upjet/v2 @ v2.4.1-0.20260728103920-4f6e6e10dff2
+# Measured: regexp.MatchString under config.matches was 575.6 MB, 32% of everything
+# a filtered, trimmed provider allocated between process start and steady state.
+--- a/upjet/pkg/config/provider.go	2026-08-29 19:24:30
++++ b/upjet/pkg/config/provider.go	2026-08-29 21:38:40
+@@ -8,6 +8,7 @@
+ 	"context"
+ 	"fmt"
+ 	"regexp"
++	"sync"
+ 
+ 	tfjson "github.com/hashicorp/terraform-json"
+ 	fwprovider "github.com/hashicorp/terraform-plugin-framework/provider"
+@@ -526,15 +527,30 @@
+ // the corresponding managed resources are not generated.
+ func (p *Provider) GetSkippedResourceNames() []string {
+ 	return p.skippedResourceNames
++}
++
++// compiledPatterns caches the compiled form of the include/skip list entries.
++// matches is called once per (resource name, list entry) pair - roughly 1.7
++// million times for a provider with 1,683 resources in its schema - and
++// regexp.MatchString compiles its pattern on every call, which accounted for
++// 32% of everything this provider allocated.
++var compiledPatterns sync.Map
++
++func compilePattern(expr string) *regexp.Regexp {
++	if v, ok := compiledPatterns.Load(expr); ok {
++		return v.(*regexp.Regexp)
++	}
++	re, err := regexp.Compile(expr)
++	if err != nil {
++		panic(errors.Wrap(err, "cannot match regular expression"))
++	}
++	compiledPatterns.Store(expr, re)
++	return re
+ }
+ 
+ func matches(name string, regexList []string) bool {
+ 	for _, r := range regexList {
+-		ok, err := regexp.MatchString(r, name)
+-		if err != nil {
+-			panic(errors.Wrap(err, "cannot match regular expression"))
+-		}
+-		if ok {
++		if compilePattern(r).MatchString(name) {
+ 			return true
+ 		}
+ 	}

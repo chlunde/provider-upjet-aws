@@ -162,3 +162,26 @@ func filterToFamily(l []string) []string {
 	}
 	return out
 }
+
+// clearSchemaFuncEnv gates the workaround for upjet's materialised-but-still-lazy
+// schemas (docs/fixes/02-clear-schemafunc.md). helper/schema.Resource.SchemaMap
+// prefers SchemaFunc over Schema, so leaving both set rebuilds the whole schema
+// map on every call - four times per reconcile - and hides this repository's
+// config/ edits from every path except the diff.
+const clearSchemaFuncEnv = "UPJET_CLEAR_SCHEMAFUNC"
+
+// clearMaterialisedSchemaFuncs drops SchemaFunc on every resource whose Schema
+// upjet has already materialised, so SchemaMap returns the cached map.
+func clearMaterialisedSchemaFuncs(pc *config.Provider) int {
+	if os.Getenv(clearSchemaFuncEnv) != "1" || pc.TerraformProvider == nil {
+		return 0
+	}
+	n := 0
+	for _, r := range pc.TerraformProvider.ResourcesMap {
+		if r.Schema != nil && r.SchemaFunc != nil {
+			r.SchemaFunc = nil
+			n++
+		}
+	}
+	return n
+}
