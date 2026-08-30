@@ -7,7 +7,10 @@ package clients
 import (
 	"context"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
@@ -348,8 +351,9 @@ func withExternalAPICallCounter(stack *middleware.Stack) error {
 // awsClientCache reuses a configured AWS client across reconciles. The entry
 // is a closure so this needs no import of the framework provider's type.
 var (
-	awsClientCacheMu sync.Mutex
-	awsClientCache   = map[string]func(*terraform.Setup){}
+	awsClientCacheMu    sync.Mutex
+	awsClientCache      = map[string]func(*terraform.Setup){}
+	awsClientCacheSwept int64
 )
 
 func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *SetupConfig, region string, creds aws.Credentials, pc *namespacedv1beta1.ClusterProviderConfig) error { //nolint:gocyclo
@@ -363,6 +367,16 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 		SkipRegionValidation:    pc.Spec.SkipRegionValidation,
 		SkipRequestingAccountId: true, // disabled to prevent extra AWS STS call
 		Token:                   creds.SessionToken,
+	}
+
+	// aws-sdk-go-base installs a Deserialize middleware that decomposes every
+	// request and response - reading the whole request body - and hands the
+	// result to logger.Debug, which discards it unless Terraform logging is on.
+	// There is no level check in that path (logger.go:113); the only guard is
+	// this flag, at middleware-install time (aws_config.go:389). Measured at
+	// 1.43 GB of 8.39 GB total allocation.
+	if os.Getenv("UPJET_SUPPRESS_SDK_DEBUG_LOG") == "1" {
+		tfAwsConnsCfg.SuppressDebugLog = true
 	}
 
 	if pc.Spec.SkipMetadataApiCheck {
@@ -389,8 +403,32 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 
 	cacheKey := ""
 	if os.Getenv("UPJET_CACHE_AWS_CLIENT") == "1" {
-		cacheKey = pc.GetName() + "|" + region + "|" + creds.AccessKeyID
+		// Key on everything that determines how the client is built, plus the
+		// credentials' identity and expiry. The provider hands this function
+		// materialised credential values (AccessKey/SecretKey/Token below), not
+		// a live provider - so even under IRSA or Pod Identity the client holds
+		// static, expiring keys, and a rotation must produce a new client. It
+		// does: the upstream AWSCredentialsProviderCache re-retrieves, the
+		// AccessKeyID and Expires change, and the key changes with them. No
+		// change to how credentials are resolved.
+		exp := int64(0)
+		if creds.CanExpire {
+			exp = creds.Expires.Unix()
+		}
+		cacheKey = pc.GetName() + "|" + region + "|" + creds.AccessKeyID + "|" + strconv.FormatInt(exp, 10)
 		awsClientCacheMu.Lock()
+		// Evict anything whose credentials have expired; entries are keyed by
+		// expiry so this bounds the map rather than letting rotations grow it.
+		if now := time.Now().Unix(); now > awsClientCacheSwept+60 {
+			awsClientCacheSwept = now
+			for k := range awsClientCache {
+				if i := strings.LastIndex(k, "|"); i >= 0 {
+					if e, err := strconv.ParseInt(k[i+1:], 10, 64); err == nil && e != 0 && e < now {
+						delete(awsClientCache, k)
+					}
+				}
+			}
+		}
 		if apply, ok := awsClientCache[cacheKey]; ok {
 			awsClientCacheMu.Unlock()
 			apply(ps)

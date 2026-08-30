@@ -39,13 +39,22 @@ for e,m in marks:
 
 def sel(a,lo,hi):
     return [r for r in rows if r["arm"]==a["arm"] and lo<=r["epoch"]<=hi]
+def mcpu(rs):
+    """milli-cores over the window, from the cgroup's cumulative cpu.stat"""
+    rs=[r for r in rs if r.get("cpu_usec","").isdigit()]
+    if len(rs)<2: return float('nan')
+    a,b=rs[0],rs[-1]
+    dt=int(b["epoch"])-int(a["epoch"])
+    if dt<=0: return float('nan')
+    return (int(b["cpu_usec"])-int(a["cpu_usec"]))/1000.0/dt
+
 def med(rs,k):
     v=[float(r[k]) for r in rs if r.get(k) not in (None,"")]
     return statistics.median(v)/1024 if v else float('nan')
 
 cols=["cg_current_kB","cg_peak_kB","anon_kB","cg_active_anon_kB","cg_anon_thp_kB","privclean_kB","VmRSS_kB","VmHWM_kB",
       "heapalloc_kB","heapinuse_kB","heapidle_kB","heapreleased_kB","heapsys_kB","gosys_kB"]
-print(f"{'arm':<22} {'phase':<8} {'n':>2} {'podMEM':>7} {'podPEAK':>8} {'anon':>7} {'actAnon':>8} {'anonTHP':>8} {'pClean':>7} {'VmRSS':>7} {'VmHWM':>7} {'halloc':>7} {'hinuse':>7} {'hidle':>7} {'hrel':>7} {'hsys':>7} {'goSys':>7}")
+print(f"{'arm':<22} {'phase':<8} {'n':>2} {'podMEM':>7} {'podPEAK':>8} {'anon':>7} {'actAnon':>8} {'anonTHP':>8} {'pClean':>7} {'VmRSS':>7} {'VmHWM':>7} {'halloc':>7} {'hinuse':>7} {'hidle':>7} {'hrel':>7} {'hsys':>7} {'goSys':>7} {'mCPU':>6}")
 for a in arms:
     if "ready" not in a: continue
     wins=[]
@@ -54,7 +63,7 @@ for a in arms:
     for name,lo,hi in wins:
         rs=sel(a,lo,hi)
         if not rs: continue
-        print(f"{a['arm']:<22} {name:<8} {len(rs):>2} " + " ".join(f"{med(rs,c):>7.1f}" for c in cols))
+        print(f"{a['arm']:<22} {name:<8} {len(rs):>2} " + " ".join(f"{med(rs,c):>7.1f}" for c in cols) + f" {mcpu(rs):>6.0f}")
 print()
 print(f"{'arm':<22} {'ready_s':>8} {'cfgBuild':>10} {'nRes':>6} {'buckets':>10} {'scavenge':>10}")
 for a in arms:
