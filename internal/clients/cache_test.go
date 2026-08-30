@@ -17,6 +17,8 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/pkg/errors"
 	"k8s.io/utils/ptr"
+
+	v1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/v1beta1"
 )
 
 var errBoom = errors.New("a")
@@ -148,5 +150,43 @@ func TestGetCallerIdentity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRetrieveCredentialsIRSAWithoutTokenFile covers the case where a
+// ProviderConfig declares Source: IRSA but no web identity token is projected
+// into the pod. That is what EKS Pod Identity looks like from inside the
+// provider - it sets AWS_CONTAINER_CREDENTIALS_FULL_URI rather than
+// AWS_WEB_IDENTITY_TOKEN_FILE - and it is also what a missing service-account
+// annotation looks like. The credentials cache must fall through to the
+// downstream provider in that case rather than failing the reconcile, which is
+// how the provider behaved before the cache existed.
+func TestRetrieveCredentialsIRSAWithoutTokenFile(t *testing.T) {
+	t.Setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "")
+
+	want := aws.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "secret", Source: "downstream"}
+	var retrieved bool
+	downstream := aws.NewCredentialsCache(aws.CredentialsProviderFunc(
+		func(_ context.Context) (aws.Credentials, error) {
+			retrieved = true
+			return want, nil
+		}))
+
+	c := NewAWSCredentialsProviderCache()
+	pc := &v1beta1.ClusterProviderConfig{}
+	pc.Spec.Credentials.Source = authKeyIRSA
+
+	got, err := c.RetrieveCredentials(context.Background(), pc, "us-east-1", downstream, nil)
+	if err != nil {
+		t.Fatalf("RetrieveCredentials(...): unexpected error with an unset token file: %v", err)
+	}
+	if !retrieved {
+		t.Error("RetrieveCredentials(...): expected the downstream credential provider to be called")
+	}
+	if diff := cmp.Diff(want.AccessKeyID, got.creds.AccessKeyID); diff != "" {
+		t.Errorf("RetrieveCredentials(...): -want, +got:\n%s", diff)
+	}
+	if len(c.cache) != 0 {
+		t.Errorf("RetrieveCredentials(...): expected nothing to be cached, got %d entries", len(c.cache))
 	}
 }

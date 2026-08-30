@@ -185,11 +185,26 @@ func (c *AWSCredentialsProviderCache) RetrieveCredentials(ctx context.Context, p
 		region,
 		string(pc.Spec.Credentials.Source),
 	}
-	tokenHash, err := hashTokenFile(os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE"))
-	if err != nil {
-		return Credentials{}, errors.Wrap(err, "cannot calculate the hash for the credentials file")
+	tokenFile := os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE")
+	if tokenFile == "" {
+		// The source says IRSA but no projected token is present. That is what
+		// EKS Pod Identity looks like from in here - it sets
+		// AWS_CONTAINER_CREDENTIALS_FULL_URI instead - and it is also what a
+		// missing service-account annotation or a non-EKS cluster looks like.
+		// Before this cache existed the default credential chain resolved all
+		// three, so skip the cache rather than failing every reconcile: there is
+		// no web-identity token to key on, and the SDK's own aws.CredentialsCache
+		// still caches whatever the chain does resolve.
+		c.logger.Debug("Credentials source is IRSA but AWS_WEB_IDENTITY_TOKEN_FILE is unset; "+
+			"skipping the credentials cache and using the default credential chain",
+			"pc", pc.GroupVersionKind().String())
+		return newCredentials(ctx, credsProvider, nil)
 	}
-	cacheKeyParams = append(cacheKeyParams, tokenHash, os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE"), os.Getenv("AWS_ROLE_ARN"))
+	tokenHash, err := hashTokenFile(tokenFile)
+	if err != nil {
+		return Credentials{}, errors.Wrapf(err, "cannot calculate the hash of the web identity token file %q", tokenFile)
+	}
+	cacheKeyParams = append(cacheKeyParams, tokenHash, tokenFile, os.Getenv("AWS_ROLE_ARN"))
 	cacheKey := strings.Join(cacheKeyParams, ":")
 	c.logger.Debug("Checking cache entry", "cacheKey", cacheKey, "pc", pc.GroupVersionKind().String())
 	c.mu.RLock()
