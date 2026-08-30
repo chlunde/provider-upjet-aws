@@ -129,7 +129,19 @@ const familyFilterEnv = "UPJET_FAMILY_FILTER"
 // upjet's config.DefaultResource default (the second word of the resource name,
 // or the first when the name has fewer than three words) as overridden by this
 // repository's GroupMap.
+// imperativeShortGroups mirrors the ShortGroup assignments that happen inside a
+// resource configurator rather than through GroupMap. A static family filter
+// cannot see those - the configurator runs later - so it would drop the resource
+// and the family's generated controllers would panic on a nil map entry at
+// startup. TestImperativeShortGroupsAreMirrored fails if a new one appears.
+var imperativeShortGroups = map[string]string{
+	"aws_lb_trust_store": "elbv2", // config/{cluster,namespaced}/elbv2/config.go
+}
+
 func shortGroupOf(resource string) string {
+	if g, ok := imperativeShortGroups[resource]; ok {
+		return g
+	}
 	if f, ok := GroupMap[resource]; ok {
 		g, _ := f(resource)
 		return g
