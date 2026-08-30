@@ -10,8 +10,12 @@ Nineteen branches across three forks (one, fix 23, retracted after measurement �
 Full write-up for each is the numbered file in this directory; this page is just
 the shape of the thing.
 
-**Verification status applies to all of it: nothing has run against a live AWS
-account or a Kubernetes cluster.** Every branch has unit tests, and every fix was
+**Verification status: nothing here has run against a live AWS account. That is
+no longer true of clusters** — everything in the *cluster-measured* section below
+was measured on a running provider pod in kind against LocalStack
+([`docs/cluster-measurement.md`](../cluster-measurement.md),
+[`hack/clustermeasure`](../../hack/clustermeasure/README.md)), and fixes 02, 06,
+09 and 11 now have cluster evidence noted against them.** Every branch has unit tests, and every fix was
 mutation-tested — the production change reverted, the tests confirmed to fail,
 then restored — so the tests are known to bite. That is the ceiling. Three items
 below name a specific thing worth checking against a real account.
@@ -59,6 +63,69 @@ fork, which is why every upjet branch here uses dashes.
 | [11](11-scope-secret-informer.md) | `fix/scope-secret-informer` @ `18fa5d0` | Cluster-wide unbounded Secret informer | security + memory |
 | [12](12-caller-identity-cache.md) | `fix/identity-cache-race-and-lock-scope` @ `efb86ce` | Data race and STS-under-lock | correctness |
 | [13](13-double-rate-limiter.md) | `fix/single-global-rate-limiter` @ `2de61d7` | `--max-reconcile-rate` delivers double what it says | 1 line |
+
+## Cluster-measured items
+
+Everything above predates the in-cluster harness. These were measured on a real
+provider pod — `docs/cluster-measurement.md` has the arms and the caveats.
+Ordered by (impact ÷ effort) within each target.
+
+**Likelihood** is my read of how a maintainer receives it: *high* = a pure
+optimisation or a one-line default with no API or maintenance cost; *medium* =
+needs a design conversation or carries a maintenance tax; *low* = asks someone to
+accept a permanent cost for someone else's measurement.
+
+### upjet
+
+| what | impact | complexity | likelihood |
+| --- | --- | --- | --- |
+| Precompile the include/skip regexes in `matches()` ([patch](../../hack/clustermeasure/upjet-measurement.patch)) | 575 MB of allocation, 32% of the total; config build 688 ms → 250 ms (2.7×), and 12.96 s → 7.48 s unfiltered. **No memory change.** | ~20 lines, one file, identical semantics | **high** |
+| Filter the resource map before `GetV2ResourceMap` converts it | **−91.5 MiB of startup peak** — the peak sets the pod's memory limit | ~15 lines, reorders `NewProvider`; changes `GetSkippedResourceNames` semantics (skipped names never enter the map) | **high**, with a note about the semantics |
+| Clear `SchemaFunc` after materialising `Schema` (fix 02) | correctness — `config/` schema edits are otherwise invisible to every path except the diff. **No memory or CPU effect** (measured; do not pitch it as one) | 1 line, branched | high |
+| Don't parse `schema.json`/`provider-metadata.yaml` for a non-generation provider | would remove the parse entirely | large — ~368 configurators index `MetaResource` and panic without it; needs the configurator chain split into generation and runtime halves | low |
+
+### aws-sdk-go-base
+
+| what | impact | complexity | likelihood |
+| --- | --- | --- | --- |
+| Guard the request/response decomposition on the logger's level | **−24% of provider CPU** at 50 and 500 MRs alike. `HandleDeserialize` decomposes every request — reading the whole body — then hands it to `logger.Debug`, which discards it. No level check exists (`logger.go:113`) | small, one middleware | medium-high |
+
+### aws-sdk-go-v2
+
+| what | impact | complexity | likelihood |
+| --- | --- | --- | --- |
+| Share the partition region regexes ([analysis](https://github.com/chlunde/notes/tree/main/aws-sdk-go-v2/endpoint-partition-regexes)) | **−8.6 MiB on the pod**, 2,152 compiled regexes → 8, byte-identical in 60 of 60 packages sampled | codegen only, and `internal/endpoints/v2` is already imported by every service — but it is a **separately versioned module**, so this bumps a minimum version across ~270 independently released service modules | medium-low — expect the module-versioning objection first |
+
+### terraform-provider-aws (the Upbound fork)
+
+| what | impact | complexity | likelihood |
+| --- | --- | --- | --- |
+| Per-family linking: tag-gate `service_packages_gen.go` **and** `internal/conns/awsclient_gen.go` | **−26.4 MiB steady, −121 MiB resident text, binary 980 MB → 332 MB.** Largest single structural win measured | both files must be trimmed — `awsclient_gen.go` imports the SDK clients and Go initialises every imported package whether or not a symbol is reachable. The service closure must be derived, not hand-written | medium — big win against a permanent fork-maintenance tax |
+
+### provider-upjet-aws
+
+| what | impact | complexity | likelihood |
+| --- | --- | --- | --- |
+| Recommend `GODEBUG=disablethp=1` (or node `transparent_hugepage=madvise`) | **−47% of what the pod is charged** | zero code — a runtime-configuration and docs change | **high** |
+| Set `SuppressDebugLog` when Terraform logging is off | **−24% CPU** | 1 line | **high** |
+| Scope the Secret informer (fix 11, already branched) | **14.2 MiB per 5,000 Secrets in the cluster** (~2.9 KB each, whether read or not) — now a measured number rather than an estimate | branched | **high** |
+| Cache the configured AWS client across reconciles (fix 09) | **−44.7 MiB at 500 managed resources**, −21 mCPU; scales with reconcile volume | ~30 lines; must key on credential identity **and expiry** — no auth change needed, because the client is handed materialised credential values | medium-high |
+| Strip `managedFields` from the informer cache | **−59 KB per managed resource**, −168 MiB of peak at 500 | ~10 lines, but must **not** strip the last-applied annotation (writes derived from cache would delete it server-side) and must be scoped with `ByObject`, not `DefaultTransform` | medium-high |
+| Per-family include list (`UPJET_FAMILY_FILTER`) | −20% steady, −20% peak, 13.7 s → 1.1 s startup | codegen; the one imperative `ShortGroup` is now mirrored and guarded by a test | medium-high |
+| Family-scoped scheme registration | −4.5 MiB | codegen — **must be generated**: a hand-picked closure broke cross-group reference resolution, verified in-cluster | medium |
+
+### Corrections to the sections above, from cluster evidence
+
+* **Fix 02** — "a full schema rebuild four times per reconcile" is real, but it
+  costs no measurable memory or CPU at `GOGC=25`. Pitch it as correctness.
+* **Fix 06** — now exercised against LocalStack. Confirmed: `spec.endpoint` is
+  ignored entirely unless `spec.endpoint.services` lists the service, and with it
+  the traffic provably reaches the custom endpoint. Item 4 of *Worth checking
+  against a real account* is discharged for the SDKv2 path.
+* **Fix 11** — has a number now: see above.
+* **Fix 13** — `--max-reconcile-rate` delivering double is worth restating: at
+  the shipped default of 100 the provider holds 6,042 goroutines and 26.3 MiB of
+  stacks for 50 managed resources, against 1,540 and 7.0 MiB at 10.
 
 ## Things that travel together
 
