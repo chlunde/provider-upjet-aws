@@ -698,3 +698,116 @@ Nothing else in `lead-triage.md`, `reconcile-workflow.md`,
 `architecture-wins.md` is contradicted by this pass. R1, R7 and R12 were
 spot-checked into `fixes/README.md` before this triage ran; all three survive,
 with R7 narrowed to its first half.
+
+
+---
+
+# Round 3 leads: from the cluster work
+
+Found while reviewing the provider's own code with the cluster measurements in
+hand. Verified against source unless marked otherwise; none is measured.
+
+## Correctness
+
+**C1. `skip_credentials_validation` silently substitutes a fake account ID.**
+`internal/clients/aws.go:126,150` return the constant `000000000000` for the
+account whenever the flag is set. That account is templated into external names
+and ARNs — `iamPolicy()` and `genericARNTemplate` in `config/externalname.go`
+among others. The flag's Terraform meaning is only "do not call STS to validate";
+a user who sets it against **real AWS** (say, because their policy forbids
+`sts:GetCallerIdentity`) gets Observe against ARNs containing the wrong account,
+hence NotFound, hence re-create loops. `docs/ideas.md` records the constant as a
+LocalStack convenience and never records this failure. Fix: separate "skip
+validation" from "fake the account", or refuse account-templated resources under
+the flag with a clear error.
+
+**C2. `spec.skip_requesting_account_id` is parsed, documented, and never read.**
+Declared in both scopes' `types.go`; no code references it —
+`internal/clients/aws.go:368` hardcodes `SkipRequestingAccountId: true` for the
+Terraform client, and the provider's own STS call is gated only by
+`SkipCredsValidation`. Setting it is a silent no-op. It is also exactly the knob
+C1 needs. Fix: honour it, or delete it with a deprecation note.
+
+**C3. Namespaced `ProviderConfig` requires `secretRef.namespace`, then ignores
+it.** The CRD marks the field **required**;
+`internal/clients/pc_resolver.go:53` then overwrites it unconditionally with the
+managed resource's namespace (same for both webIdentity token refs). A user
+pointing at a secret in another namespace is silently redirected to their own,
+where a same-named secret may exist and be used instead. The namespaced
+`PasswordGenerator` already made the equivalent API change to a local selector;
+the ProviderConfig API did not. Fix: use a local selector type, or error when the
+declared namespace differs.
+
+**C4. `Source: IRSA` without `AWS_WEB_IDENTITY_TOKEN_FILE` now fails every
+reconcile, with a misleading message.** `internal/clients/creds_cache.go:188-192`
+hashes the token file unconditionally once the source is IRSA, returning "token
+file name cannot be empty" when the variable is unset — EKS Pod Identity, a
+missing service-account annotation, a non-EKS cluster. Before the credentials
+cache this fell through to the default chain. Wrapped as "cannot calculate the
+hash for the credentials file", which names neither IRSA nor the variable.
+
+**C5. `eks/clusterauth` dereferences fields that are nil while a cluster is
+CREATING.** `internal/controller/{cluster,namespaced}/eks/clusterauth/controller.go:144,185`
+and `eks.go:59,66,89` dereference `CertificateAuthority` / `Endpoint`, which are
+nil until the cluster is ACTIVE — the common composition case of creating Cluster
+and ClusterAuth together. The `== ""` guards show the empty case was anticipated
+and the nil case was not. Fix: nil checks returning a retryable error.
+
+**C6. `clusterauth`'s documented `refreshPeriod` maximum is not enforced.** The
+type comment says "The maximum is 10m0s"; nothing validates it. The token is
+capped at 15 minutes while the freshness window is the uncapped `RefreshPeriod`,
+so `refreshPeriod: 30m` is accepted and yields a connection secret whose token is
+dead for half of every period. Fix: a CEL validation, or cap the deadline.
+
+**C7. upjet's `MetricRecorder` is a `manager.Runnable` that nothing runs.** The
+generated controllers create one per kind, but only the *state-metrics* recorder
+is passed to `mgr.Add` (`config/templates/controller.go.tmpl:145`). The
+`MetricRecorder`'s `Start` exists solely to register the Delete handler that
+drops per-MR entries, so on a cluster with managed-resource churn the observation
+map grows without bound. Fix: add it, or drop the dead `Start` upstream.
+
+**C8. An inverted guard returns success on its failure path.**
+`internal/clients/aws.go:111-113`: the `awsCfg == nil` branch wraps a
+necessarily-nil `err`, so `errors.Wrap` yields nil and the guard returns an empty
+`Setup` with no error. Unreachable today. One-line fix: `errors.New`.
+
+## Waste
+
+**W1. The `aws.Config` is rebuilt on every reconcile.**
+`getAWSConfigWithDefaultRegion` runs at `internal/clients/aws.go:108`, *before*
+the AWS client cache, so every reconcile re-parses the credentials secret with
+go-ini and re-runs `config.LoadDefaultConfig` — which re-reads `~/.aws` files.
+Measured at 154.7 MB per nine minutes of allocation that the client cache cannot
+reach. Both pieces are pure functions of the ProviderConfig and could be keyed
+beside the credentials cache.
+
+**W2. `getRegion` converts the whole managed resource to unstructured to read one
+string.** `internal/clients/provider_config.go:76-88` runs
+`DefaultUnstructuredConverter.ToUnstructured` — a full reflection walk of the
+spec — to fetch `spec.forProvider.region`. A generated getter would remove it.
+
+**W3. The legacy ProviderConfig round trip, twice per reconcile.**
+`legacyToModernProviderConfigSpec` (JSON marshal + unmarshal,
+`pc_resolver.go:24-46`) plus the reconciliationpolicy wrapper re-resolving the
+same config: together ~2% of CPU samples at 500 managed resources. A hand-written
+converter and a (UID, generation) memo would erase both. This quantifies L9/L10,
+which were established by reading.
+
+**W4. The API-call counter resolves its Prometheus labels per call.**
+`withExternalAPICallCounter` (`internal/clients/aws.go:313-346`) calls
+`WithLabelValues(serviceID, operationName)` on every AWS API call — 0.96% of CPU
+and of allocation, the second-largest provider-owned frame in both profiles. A
+small map of pre-resolved counters removes it.
+
+**W5. Each scope builds its own credentials cache.** `SelectTerraformSetup` is
+called once per scope and news up an `AWSCredentialsProviderCache` each time, so
+cluster- and namespaced-scoped resources sharing an identity pay separate STS
+calls and hold duplicate entries.
+
+## Dead
+
+`config/externalnamenottested.go` (731 lines, `ExternalNameNotTestedConfigs`) is
+referenced nowhere, and 18 of its entries duplicate live map entries — promoted
+to tested and never removed here, so the copies can diverge unnoticed.
+`skipList` in `config/registry_common.go` lists `aws_alb$` and
+`aws_alb_target_group_attachment$` twice.
