@@ -35,3 +35,11 @@ func GetManagedResource(group, version, kind, listKind string) (xpresource.Manag
 func BuildScheme(sb runtime.SchemeBuilder) error {
 	return errors.Wrap(sb.AddToScheme(s), "failed to register the GVKs with the runtime scheme")
 }
+
+// SetScheme makes the resolver use an existing scheme instead of the private one
+// it would otherwise populate itself. Every GVK the resolver needs is already
+// registered with the manager's scheme, so building a second one registers all
+// 8,488 of them twice - see docs/cluster-measurement.md.
+func SetScheme(sc *runtime.Scheme) {
+	s = sc
+}

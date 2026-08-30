@@ -6,6 +6,8 @@ package clients
 
 import (
 	"context"
+	"os"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
@@ -343,6 +345,13 @@ func withExternalAPICallCounter(stack *middleware.Stack) error {
 // configureNoForkAWSClient populates the supplied *terraform.Setup with
 // Terraform Plugin SDK style AWS client (Meta) and Terraform Plugin Framework
 // style FrameworkProvider
+// awsClientCache reuses a configured AWS client across reconciles. The entry
+// is a closure so this needs no import of the framework provider's type.
+var (
+	awsClientCacheMu sync.Mutex
+	awsClientCache   = map[string]func(*terraform.Setup){}
+)
+
 func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *SetupConfig, region string, creds aws.Credentials, pc *namespacedv1beta1.ClusterProviderConfig) error { //nolint:gocyclo
 	tfAwsConnsCfg := xpprovider.AWSConfig{
 		AccessKey:               creds.AccessKeyID,
@@ -378,6 +387,18 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 	xpac := &xpprovider.AWSClient{}
 	xpac.SetServicePackagesField(p.(*xpprovider.AWSClient).GetServicePackages())
 
+	cacheKey := ""
+	if os.Getenv("UPJET_CACHE_AWS_CLIENT") == "1" {
+		cacheKey = pc.GetName() + "|" + region + "|" + creds.AccessKeyID
+		awsClientCacheMu.Lock()
+		if apply, ok := awsClientCache[cacheKey]; ok {
+			awsClientCacheMu.Unlock()
+			apply(ps)
+			return nil
+		}
+		awsClientCacheMu.Unlock()
+	}
+
 	tfAwsConnsClient, diags := tfAwsConnsCfg.GetClient(ctx, xpac)
 	if diags.HasError() {
 		return errors.Errorf("cannot construct TF AWS Client from TF AWS Config, %v", diags)
@@ -395,6 +416,13 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 
 	// Register AWS SDK v2 call counter
 	tfAwsConnsClient.AppendAPIOptions(withExternalAPICallCounter)
+
+	if cacheKey != "" {
+		awsClientCacheMu.Lock()
+		meta, fw := ps.Meta, ps.FrameworkProvider
+		awsClientCache[cacheKey] = func(s *terraform.Setup) { s.Meta = meta; s.FrameworkProvider = fw }
+		awsClientCacheMu.Unlock()
+	}
 
 	return nil
 }

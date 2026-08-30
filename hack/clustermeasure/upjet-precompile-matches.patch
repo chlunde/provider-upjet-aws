@@ -1,18 +1,48 @@
-# Precompile the include/skip list patterns in upjet's matches().
-# Apply to github.com/crossplane/upjet/v2 @ v2.4.1-0.20260728103920-4f6e6e10dff2
-# Measured: regexp.MatchString under config.matches was 575.6 MB, 32% of everything
-# a filtered, trimmed provider allocated between process start and steady state.
 --- a/upjet/pkg/config/provider.go	2026-08-29 19:24:30
-+++ b/upjet/pkg/config/provider.go	2026-08-29 21:38:40
-@@ -8,6 +8,7 @@
++++ b/upjet/pkg/config/provider.go	2026-08-29 23:20:51
+@@ -7,7 +7,9 @@
+ import (
  	"context"
  	"fmt"
++	"os"
  	"regexp"
 +	"sync"
  
  	tfjson "github.com/hashicorp/terraform-json"
  	fwprovider "github.com/hashicorp/terraform-plugin-framework/provider"
-@@ -526,15 +527,30 @@
+@@ -386,7 +388,6 @@
+ 		rs = v.ResourceSchemas
+ 		break
+ 	}
+-	resourceMap := conversiontfjson.GetV2ResourceMap(rs)
+ 	providerMetadata, err := registry.NewProviderMetadataFromFile(metadata)
+ 	if err != nil {
+ 		panic(errors.Wrap(err, "cannot load provider metadata"))
+@@ -408,7 +409,23 @@
+ 
+ 	for _, o := range opts {
+ 		o(p)
++	}
++
++	// GetV2ResourceMap converts every schema in the file - 1,683 for AWS - into
++	// the plugin-SDK representation, and the loop below then drops every one the
++	// include lists do not keep. Converting only what is kept avoids building an
++	// object graph that is discarded immediately; measured at tens of MiB of peak
++	// heap for a provider that keeps 25 of 1,683.
++	if os.Getenv("UPJET_LAZY_CONVERT") == "1" {
++		kept := make(map[string]*tfjson.Schema, len(rs))
++		for name, sch := range rs {
++			if matches(name, p.IncludeList) || matches(name, p.TerraformPluginSDKIncludeList) || matches(name, p.TerraformPluginFrameworkIncludeList) {
++				kept[name] = sch
++			}
++		}
++		rs = kept
+ 	}
++	resourceMap := conversiontfjson.GetV2ResourceMap(rs)
+ 
+ 	p.skippedResourceNames = make([]string, 0, len(resourceMap))
+ 	terraformPluginFrameworkResourceFunctionsMap := terraformPluginFrameworkResourceFunctionsMap(p.TerraformPluginFrameworkProvider)
+@@ -526,15 +543,30 @@
  // the corresponding managed resources are not generated.
  func (p *Provider) GetSkippedResourceNames() []string {
  	return p.skippedResourceNames

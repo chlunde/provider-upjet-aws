@@ -29,12 +29,16 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/statemetrics"
 	tjcontroller "github.com/crossplane/upjet/v2/pkg/controller"
 	"github.com/crossplane/upjet/v2/pkg/controller/conversion"
+	"github.com/go-logr/zapr"
 	"github.com/hashicorp/terraform-provider-aws/xpprovider"
+	uzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -49,7 +53,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	clusterapis "github.com/upbound/provider-aws/v2/apis/cluster"
+	clusteriamv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/iam/v1beta1"
+	clusterkmsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/kms/v1beta1"
+	clusters3v1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/s3/v1beta1"
+	clusters3v1beta2 "github.com/upbound/provider-aws/v2/apis/cluster/s3/v1beta2"
+	clusters3controlv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/s3control/v1beta1"
+	clustersnsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/sns/v1beta1"
+	clustersqsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/sqs/v1beta1"
+	clusterpcv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/v1beta1"
 	namespacedapis "github.com/upbound/provider-aws/v2/apis/namespaced"
+	nss3v1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/s3/v1beta1"
+	nspcv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/v1beta1"
 	config "github.com/upbound/provider-aws/v2/config"
 	resolverapis "github.com/upbound/provider-aws/v2/internal/apis"
 	"github.com/upbound/provider-aws/v2/internal/bootcheck"
@@ -120,9 +134,23 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 	log.Default().SetOutput(io.Discard)
-	ctrl.SetLogger(zap.New(zap.WriteTo(io.Discard)))
+	if os.Getenv("UPJET_NO_LOG_SAMPLER") == "1" {
+		// controller-runtime's zap.New wraps the core in a sampler whose fixed
+		// counter array costs 1.5 MiB, even for a logger that discards
+		// everything (pkg/log/zap/zap.go:206).
+		ctrl.SetLogger(zapr.NewLogger(uzap.NewNop()))
+	} else {
+		ctrl.SetLogger(zap.New(zap.WriteTo(io.Discard)))
+	}
 
 	zl := zap.New(zap.UseDevMode(*debug))
+	if os.Getenv("UPJET_NO_LOG_SAMPLER") == "1" && !*debug {
+		// controller-runtime wraps the core in zapcore.NewSamplerWithOptions
+		// (pkg/log/zap/zap.go:206) whose fixed counter array costs 1.5 MiB.
+		core := zapcore.NewCore(zapcore.NewJSONEncoder(uzap.NewProductionEncoderConfig()),
+			zapcore.Lock(os.Stderr), zapcore.InfoLevel)
+		zl = zapr.NewLogger(uzap.New(core, uzap.AddStacktrace(zapcore.ErrorLevel)))
+	}
 	logr := logging.NewLogrLogger(zl.WithName("provider-aws"))
 	if *debug {
 		// The controller-runtime runs with a no-op logger by default. It is
@@ -163,10 +191,31 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 
 	scheme := runtime.NewScheme()
 	kingpin.FatalIfError(clientgoscheme.AddToScheme(scheme), "Cannot add client-go APIs to scheme")
-	kingpin.FatalIfError(clusterapis.AddToScheme(scheme), "Cannot add cluster scoped AWS APIs to scheme")
-	kingpin.FatalIfError(resolverapis.BuildScheme(clusterapis.AddToSchemes), "Cannot register cluster scoped AWS APIs with the API resolver's runtime scheme")
-	kingpin.FatalIfError(namespacedapis.AddToScheme(scheme), "Cannot add namespaced AWS APIs to scheme")
-	kingpin.FatalIfError(resolverapis.BuildScheme(namespacedapis.AddToSchemes), "Cannot register namespaced AWS APIs with the API resolver's runtime scheme")
+	if os.Getenv("UPJET_SCHEME_FAMILY") == "1" {
+		// Only the groups this family's controllers and resolvers instantiate.
+		for _, add := range []func(*runtime.Scheme) error{
+			clusters3v1beta1.AddToScheme, clusters3v1beta2.AddToScheme,
+			clusteriamv1beta1.AddToScheme, clusterkmsv1beta1.AddToScheme,
+			clusters3controlv1beta1.AddToScheme, clustersnsv1beta1.AddToScheme,
+			clustersqsv1beta1.AddToScheme,
+			clusterpcv1beta1.SchemeBuilder.AddToScheme,
+			nss3v1beta1.AddToScheme,
+			nspcv1beta1.SchemeBuilder.AddToScheme,
+		} {
+			kingpin.FatalIfError(add(scheme), "Cannot add family API group to scheme")
+		}
+	} else {
+		kingpin.FatalIfError(clusterapis.AddToScheme(scheme), "Cannot add cluster scoped AWS APIs to scheme")
+		kingpin.FatalIfError(namespacedapis.AddToScheme(scheme), "Cannot add namespaced AWS APIs to scheme")
+	}
+	if os.Getenv("UPJET_SHARE_SCHEME") == "1" {
+		// The resolver's GVKs are a subset of the manager's; registering them
+		// twice costs a second copy of all 8,488 of them.
+		resolverapis.SetScheme(scheme)
+	} else {
+		kingpin.FatalIfError(resolverapis.BuildScheme(clusterapis.AddToSchemes), "Cannot register cluster scoped AWS APIs with the API resolver's runtime scheme")
+		kingpin.FatalIfError(resolverapis.BuildScheme(namespacedapis.AddToSchemes), "Cannot register namespaced AWS APIs with the API resolver's runtime scheme")
+	}
 	kingpin.FatalIfError(apiextensionsv1.AddToScheme(scheme), "Cannot add api-extensions APIs to scheme")
 
 	// Secret caching is enabled by default. Disabling it trades API server
@@ -187,6 +236,28 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 		LeaderElectionID: "crossplane-leader-election-provider-aws-s3",
 		Cache: cache.Options{
 			SyncPeriod: syncInterval,
+			// Every cached managed resource carries two things no reconciler
+			// reads: metadata.managedFields, which for a server-side-applied
+			// object is often larger than the spec, and the last-applied
+			// annotation, which is a second copy of the object. The informer
+			// cache holds one per MR, so this scales with the installation.
+			DefaultTransform: func(i any) (any, error) {
+				if os.Getenv("UPJET_STRIP_CACHE_METADATA") != "1" {
+					return i, nil
+				}
+				o, ok := i.(metav1.Object)
+				if !ok {
+					return i, nil
+				}
+				o.SetManagedFields(nil)
+				if a := o.GetAnnotations(); a != nil {
+					if _, found := a[corev1.LastAppliedConfigAnnotation]; found {
+						delete(a, corev1.LastAppliedConfigAnnotation)
+						o.SetAnnotations(a)
+					}
+				}
+				return i, nil
+			},
 			ByObject: map[client.Object]cache.ByObject{
 				&apiextensionsv1.CustomResourceDefinition{}: {
 					// CRD OpenAPI schemas are large and unused by the

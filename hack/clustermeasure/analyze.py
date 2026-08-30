@@ -50,7 +50,7 @@ for a in arms:
     if "ready" not in a: continue
     wins=[]
     if a.get("idle_end"): wins.append(("idle", a["ready"]+30, a["idle_end"]))
-    if a.get("end"): wins.append(("steady", a["end"]-300, a["end"]))
+    if a.get("end"): wins.append(("steady", a["end"]-150, a["end"]))
     for name,lo,hi in wins:
         rs=sel(a,lo,hi)
         if not rs: continue
