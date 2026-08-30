@@ -204,10 +204,10 @@
 <header class="masthead">
   <p class="eyebrow">provider-upjet-aws &middot; s3 family &middot; kind + LocalStack &middot; 29 Aug 2026</p>
   <h1>The provider pod's 380&nbsp;MB</h1>
-  <p class="standfirst">Forty arms, four rounds, measured through the cgroup Kubernetes actually
-  bills. The biggest lever was a kernel setting nobody had looked at. The second was not parsing
-  26&nbsp;MB of embedded data that the running provider reads 0.35&nbsp;MB of. The third was eight
-  regular expressions compiled 269 times. 382&nbsp;MiB became 108.</p>
+  <p class="standfirst">Sixty arms, nine rounds, measured through the cgroup Kubernetes actually
+  bills. A kernel setting nobody had looked at. 26&nbsp;MB of embedded data parsed to read
+  0.35&nbsp;MB of it. Eight regular expressions compiled 269 times. An AWS client rebuilt, with a
+  fresh connection pool, on every single reconcile. 382&nbsp;MiB became 76.6.</p>
 
   <div class="readout">
     <div>
@@ -592,7 +592,48 @@ worth ~20&nbsp;MiB of live heap &mdash; about 25&nbsp;MiB of pod memory at <code
 is what would put steady state in the mid-80s. Nothing else measured gets under 100.</p>
 </div>
 
-<h2>09 / What to do</h2>
+
+<h2>09 / Rounds five to nine</h2>
+<p class="h2sub">The structural changes, and the method note that matters</p>
+
+<div class="tablewrap" style="margin: 24px 0 8px;">
+<table>
+  <thead><tr><th>change</th><th>50 MRs</th><th>500 MRs</th><th>what it is</th></tr></thead>
+  <tbody>
+    <tr><td>per-family linking</td><td class="pos">&minus;26.4</td><td></td><td style="text-align:left">19 of 267 service packages; binary 980 &rarr; 332 MB</td></tr>
+    <tr><td>filter before convert</td><td class="pos">&minus;91.5 peak</td><td></td><td style="text-align:left">~15 lines in upjet, no build step</td></tr>
+    <tr><td>cache the AWS client</td><td>&minus;6.3</td><td class="pos">&minus;59.6</td><td style="text-align:left">a fresh connection pool per reconcile</td></tr>
+    <tr><td>strip the informer cache</td><td></td><td class="pos">&minus;29.5</td><td style="text-align:left">&minus;59 KB per managed resource</td></tr>
+    <tr><td>family-scoped scheme</td><td class="pos">&minus;7.5</td><td></td><td style="text-align:left">6 API groups instead of 178</td></tr>
+    <tr class="hi"><td>all together</td><td class="pos">76.6</td><td class="pos">109.7</td><td style="text-align:left">from 382.2 and 486.7</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="callout col">
+  <span class="label">The method note</span>
+  <p><strong><code>alloc_space</code> ranks what to fix for speed; <code>inuse_space</code> ranks what
+  to fix for footprint &mdash; and they disagree.</strong> The three largest allocation sites (575 MB of
+  regex compilation, 168 MB per 3.3 min of schema deep-copying, 49 MB of schema rebuilds) moved the pod
+  metric by <em>nothing</em>: garbage the collector keeps up with never becomes resident. The three
+  largest <em>retained</em> structures moved it by 90 MiB.</p>
+</div>
+
+<div class="col">
+<p>Two corrections came out of these rounds. Per-family linking needs <em>both</em> generated
+registries trimmed &mdash; <code>awsclient_gen.go</code> imports the SDK clients, and Go initialises
+every imported package whether or not a symbol is reachable, so &ldquo;accessors do not root at link
+time&rdquo; is true of text and false of <code>init</code>. And <code>init</code> is 18.6&nbsp;MiB of a
+stock provider&rsquo;s live heap. The second: memoising the implied cty type, which looked like a
+16&nbsp;MiB win, moved nothing &mdash; that memory is in-flight reconcile state, not per-resource
+retention.</p>
+
+<p>All of it verified on the fully-patched binary: 500 resources created, a second kind reconciled
+with LocalStack independently confirming the change reached the API, and deletion removing both the
+managed resource and the bucket.</p>
+</div>
+
+<h2>10 / What to do</h2>
 <p class="h2sub">Ranked by measured effect on the pod metric</p>
 
 <ol class="rec">
@@ -608,6 +649,24 @@ is what would put steady state in the mid-80s. Nothing else measured gets under 
     <span class="rd">Without it the provider is OOM-killed at any limit below its startup peak; with
     it, it runs at 300Mi. Apply it <em>after</em> the trim, or it costs 40 s of startup.</span>
     <span class="rm">OOMKilled &rarr; 0 restarts at 300Mi</span>
+  </li>
+  <li>
+    <span class="rt">Filter the resource map before converting it</span>
+    <span class="rd">upjet converts all 1,683 schemas before consulting any include list, then
+    discards what is not kept. ~15 lines, no build step, no second copy of the blobs.</span>
+    <span class="rm">&minus;91.5 MiB of startup peak</span>
+  </li>
+  <li>
+    <span class="rt">Stop rebuilding the AWS client every reconcile</span>
+    <span class="rd">Each <code>Connect</code> constructs a fresh client with its own
+    <code>HTTPClient</code>, so every reconcile starts with an empty connection pool.</span>
+    <span class="rm">&minus;59.6 MiB at 500 managed resources</span>
+  </li>
+  <li>
+    <span class="rt">Strip the informer cache</span>
+    <span class="rd"><code>managedFields</code> and the last-applied annotation, dropped on the way
+    in &mdash; the mechanism the CRD cache already uses.</span>
+    <span class="rm">&minus;59 KB per managed resource</span>
   </li>
   <li>
     <span class="rt">Share the AWS SDK's partition regexes</span>
@@ -647,7 +706,7 @@ is what would put steady state in the mid-80s. Nothing else measured gets under 
   </li>
 </ol>
 
-<h2>10 / Scope</h2>
+<h2>11 / Scope</h2>
 <p class="h2sub">What this does not cover</p>
 
 <div class="col">
