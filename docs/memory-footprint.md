@@ -863,6 +863,82 @@ registry-only reaches the same number needs one full link (~20 GB transient),
 which did not fit in the analysis environment. **Measure this before proposing
 anything.**
 
+
+---
+
+## The settled design for §1 and §2, after the cluster work
+
+Both proposals above were written before anything ran in a cluster. Rounds 5-12
+of [`cluster-measurement.md`](cluster-measurement.md) measured them and changed
+three things about their shape.
+
+### The filter: generate the family table, and make the family a build-time input
+
+The choice this document poses — special-case the `elbv2` override, or "drive the
+filter off a generated group table" — resolves to the second, and it is smaller
+than it sounds. `cmd/generator` already builds the fully configured provider, so
+emitting `config/zz_families.go` (resource name → short group, ~1,029 entries)
+after `ConfigureResources()` captures imperative `ShortGroup` assignments **by
+construction**. That deletes `shortGroupOf`, the `imperativeShortGroups` mirror,
+and the test that guards the mirror — the whole category goes away rather than
+being defended.
+
+The family itself should be a **generation-time parameter** threaded through
+`config/templates/main.go.tmpl` (which already receives `{{ .Group }}`), not an
+environment variable. An env var is a runtime input that can *narrow* the
+provider, and narrowing is what reaches the 3,136 unchecked
+`o.Provider.Resources["aws_x"]` index sites. A compiled-in family cannot be
+mis-set; a `UPJET_DISABLE_FAMILY_FILTER=1` escape hatch can only *widen*, back to
+today's behaviour. The monolith passes the empty string by template conditional,
+so "under a filter, `Setup_<family>` is the only legal entry point" becomes
+enforced by generation rather than by discipline.
+
+`config/templates/controller.go.tmpl` should also lift the map index into a
+nil-checked local with a named error, so a filter/controller-set disagreement is
+a legible startup error instead of a bare nil dereference.
+
+### Filtering the parse beats trimming the file
+
+§3's "skip the embedded JSON schema and registry metadata" has a cheaper form
+that needs no build step and no second copy of the blobs: filter the resource map
+**before** `GetV2ResourceMap` converts all 1,683 schemas. Measured at **−91.5 MiB
+of startup peak**, about 85% of what trimming the embedded files achieves, and it
+is semantics-preserving if the skipped names are recorded from the pre-filter key
+set. It is an unconditional upjet change — a no-op for any provider whose include
+list is the default `.+`.
+
+### Per-family linking: one tag must gate both files
+
+The "Three designs" section below recommends a single build-tag line on
+`service_packages_gen.go`. Two corrections from measurement and from reading the
+fork:
+
+* **`internal/conns/awsclient_gen.go` must be partitioned too.** Its 266 accessor
+  *return types* import the SDK clients, and Go initialises every imported
+  package whether or not a symbol is reachable — so leaving it alone leaves every
+  service's `endpoints.init` on the heap. The correction elsewhere in this
+  document ("accessors do not root at link time") is true of text and false of
+  `init`, and `init` is 18.6 MiB of a stock provider's live heap.
+* **One tag must gate both halves of a service.** `conns.client[T]`
+  (`awsclient.go:453`) resolves through `c.servicePackages[name]`, so an accessor
+  whose service package is unregistered compiles and then fails at runtime with
+  `unknown service package`. A single `xp_svc_<service>` tag covering the accessor
+  and the registration makes that state unrepresentable.
+
+The tag vocabulary should be **per service, not per family**: the fork speaks
+services, which it owns, and the consumer composes them into families, which it
+owns. The closure is a fixpoint over two edge kinds — service-to-service imports
+*and* `*Client(ctx)` accessor calls — because neither alone is sufficient
+(`ec2` imports `kms`, `organizations` and `s3`; `organizations` reaches `account`
+only through an accessor). Compute it with `go/ast` over the fork source and hard-
+fail on an accessor name absent from the manifest, so a new dynamic access pattern
+upstream is a generation-time error.
+
+A scoped binary is only correct with the include-list filter compiled in;
+otherwise `NewProvider` panics on the first include-listed resource whose Go
+schema is unlinked. That panic is the enforcement: **a scoped binary that forgot
+its filter cannot start.**
+
 ## Three designs, ranked by conflict surface
 
 The fork's most valuable property is that it is **105 lines across 2 new files**
