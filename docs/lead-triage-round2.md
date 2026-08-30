@@ -739,7 +739,9 @@ the ProviderConfig API did not. Fix: use a local selector type, or error when th
 declared namespace differs.
 
 **C4. `Source: IRSA` without `AWS_WEB_IDENTITY_TOKEN_FILE` now fails every
-reconcile, with a misleading message.** `internal/clients/creds_cache.go:188-192`
+reconcile, with a misleading message. FIXED — the cache is skipped and the
+default chain used, with `TestRetrieveCredentialsIRSAWithoutTokenFile` as a
+mutation-tested guard.** `internal/clients/creds_cache.go:188-192`
 hashes the token file unconditionally once the source is IRSA, returning "token
 file name cannot be empty" when the variable is unset — EKS Pod Identity, a
 missing service-account annotation, a non-EKS cluster. Before the credentials
