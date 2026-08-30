@@ -1146,3 +1146,35 @@ So there are two noise bands, and they are an order of magnitude apart:
 Every conclusion in this document should be read against whichever band applies
 to how its arms were run. The rounds 11-12 results are same-binary throughout;
 most of rounds 5-9 are not.
+
+
+## Round 12c: the whole GOGC curve, and what to actually recommend
+
+| 50 managed resources | steady | CPU |
+| --- | ---: | ---: |
+| `GOGC=25` | 55.0 | 35 mCPU |
+| `GOGC=50` | 63.3 | **25 mCPU** |
+
+| 500 managed resources | steady | CPU | peak |
+| --- | ---: | ---: | ---: |
+| `GOGC=25` | **82.2** | 182 mCPU | 125.6 |
+| `GOGC=50` | 95.3 | 124 mCPU | 146.0 |
+| `GOGC=50` + `GOMEMLIMIT=110MiB` | 95.3 | 127 mCPU | **114.2** |
+| `GOGC=100` + `GOMEMLIMIT=120MiB` | 113.2 | **103 mCPU** | 120.1 |
+
+Two things fall out.
+
+**`GOGC=50` is the knee at both scales.** Going 25 → 50 costs 8.3 MiB at 50
+managed resources and 13.1 at 500, and returns 29% and 32% of CPU respectively.
+Going 50 → 100 costs another 17.9 MiB for a further 17%.
+
+**`GOMEMLIMIT` is free, and it is the peak lever.** At `GOGC=50` it changed
+steady state not at all (95.3 either way) and CPU not at all (124 vs 127, inside
+the ±0.2% same-binary band), while taking the peak from 146.0 to **114.2 MiB** -
+the lowest peak measured anywhere in this document. Peak is what a pod's memory
+limit has to cover, so this is the setting that decides whether the provider fits
+in a 128Mi request.
+
+**Recommendation: `GOGC=50` with `GOMEMLIMIT` set ~15-20% above expected steady
+state.** Use `GOGC=25` only where memory is scarcer than CPU, and know that it
+costs about a third of the provider's CPU to save ~13 MiB.
