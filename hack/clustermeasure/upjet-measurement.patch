@@ -1,0 +1,131 @@
+# All upjet changes used by the v4-v9 measurement binaries.
+# Apply to github.com/crossplane/upjet/v2 @ v2.4.1-0.20260728103920-4f6e6e10dff2,
+# then: go mod edit -replace github.com/crossplane/upjet/v2=<local copy>
+#
+#   matches()            precompile the include/skip patterns
+#   UPJET_LAZY_CONVERT   filter the resource map before GetV2ResourceMap
+#   UPJET_CACHE_IMPLIED_TYPE  memoise CoreConfigSchema().ImpliedType() (measured null)
+
+--- a/upjet/pkg/config/provider.go	2026-08-29 19:24:30
++++ b/upjet/pkg/config/provider.go	2026-08-29 23:20:51
+@@ -7,7 +7,9 @@
+ import (
+ 	"context"
+ 	"fmt"
++	"os"
+ 	"regexp"
++	"sync"
+ 
+ 	tfjson "github.com/hashicorp/terraform-json"
+ 	fwprovider "github.com/hashicorp/terraform-plugin-framework/provider"
+@@ -386,7 +388,6 @@
+ 		rs = v.ResourceSchemas
+ 		break
+ 	}
+-	resourceMap := conversiontfjson.GetV2ResourceMap(rs)
+ 	providerMetadata, err := registry.NewProviderMetadataFromFile(metadata)
+ 	if err != nil {
+ 		panic(errors.Wrap(err, "cannot load provider metadata"))
+@@ -408,7 +409,23 @@
+ 
+ 	for _, o := range opts {
+ 		o(p)
++	}
++
++	// GetV2ResourceMap converts every schema in the file - 1,683 for AWS - into
++	// the plugin-SDK representation, and the loop below then drops every one the
++	// include lists do not keep. Converting only what is kept avoids building an
++	// object graph that is discarded immediately; measured at tens of MiB of peak
++	// heap for a provider that keeps 25 of 1,683.
++	if os.Getenv("UPJET_LAZY_CONVERT") == "1" {
++		kept := make(map[string]*tfjson.Schema, len(rs))
++		for name, sch := range rs {
++			if matches(name, p.IncludeList) || matches(name, p.TerraformPluginSDKIncludeList) || matches(name, p.TerraformPluginFrameworkIncludeList) {
++				kept[name] = sch
++			}
++		}
++		rs = kept
+ 	}
++	resourceMap := conversiontfjson.GetV2ResourceMap(rs)
+ 
+ 	p.skippedResourceNames = make([]string, 0, len(resourceMap))
+ 	terraformPluginFrameworkResourceFunctionsMap := terraformPluginFrameworkResourceFunctionsMap(p.TerraformPluginFrameworkProvider)
+@@ -526,15 +543,30 @@
+ // the corresponding managed resources are not generated.
+ func (p *Provider) GetSkippedResourceNames() []string {
+ 	return p.skippedResourceNames
++}
++
++// compiledPatterns caches the compiled form of the include/skip list entries.
++// matches is called once per (resource name, list entry) pair - roughly 1.7
++// million times for a provider with 1,683 resources in its schema - and
++// regexp.MatchString compiles its pattern on every call, which accounted for
++// 32% of everything this provider allocated.
++var compiledPatterns sync.Map
++
++func compilePattern(expr string) *regexp.Regexp {
++	if v, ok := compiledPatterns.Load(expr); ok {
++		return v.(*regexp.Regexp)
++	}
++	re, err := regexp.Compile(expr)
++	if err != nil {
++		panic(errors.Wrap(err, "cannot match regular expression"))
++	}
++	compiledPatterns.Store(expr, re)
++	return re
+ }
+ 
+ func matches(name string, regexList []string) bool {
+ 	for _, r := range regexList {
+-		ok, err := regexp.MatchString(r, name)
+-		if err != nil {
+-			panic(errors.Wrap(err, "cannot match regular expression"))
+-		}
+-		if ok {
++		if compilePattern(r).MatchString(name) {
+ 			return true
+ 		}
+ 	}
+--- a/upjet/pkg/controller/external_tfpluginsdk.go	2026-08-29 19:24:30
++++ b/upjet/pkg/controller/external_tfpluginsdk.go	2026-08-30 09:04:13
+@@ -6,6 +6,8 @@
+ 
+ import (
+ 	"context"
++	"os"
++	"sync"
+ 	"fmt"
+ 	"strings"
+ 	"time"
+@@ -821,9 +823,30 @@
+ func (n *terraformPluginSDKExternal) Disconnect(_ context.Context) error {
+ 	return nil
+ }
++
++// impliedTypeCache memoises the cty type implied by a resource's schema. The
++// type is a pure function of the schema, but CoreConfigSchema().ImpliedType()
++// rebuilds it on every Observe, Create and Update - and the value it produces is
++// then retained per managed resource. Measured on a provider holding 500 managed
++// resources: cty.Object and cty.ObjectVal accounted for 16.4 MiB, 31% of the
++// live heap, one copy per resource of a type there are only 25 distinct
++// instances of.
++var impliedTypeCache sync.Map
+ 
++func (n *terraformPluginSDKExternal) impliedType() cty.Type {
++	if os.Getenv("UPJET_CACHE_IMPLIED_TYPE") != "1" {
++		return n.config.TerraformResource.CoreConfigSchema().ImpliedType()
++	}
++	if v, ok := impliedTypeCache.Load(n.config.Name); ok {
++		return v.(cty.Type)
++	}
++	t := n.config.TerraformResource.CoreConfigSchema().ImpliedType()
++	impliedTypeCache.Store(n.config.Name, t)
++	return t
++}
++
+ func (n *terraformPluginSDKExternal) fromInstanceStateToJSONMap(newState *tf.InstanceState) (map[string]interface{}, cty.Value, error) {
+-	impliedType := n.config.TerraformResource.CoreConfigSchema().ImpliedType()
++	impliedType := n.impliedType()
+ 	attrsAsCtyValue, err := newState.AttrsAsObjectValue(impliedType)
+ 	if err != nil {
+ 		return nil, cty.NilVal, errors.Wrap(err, "could not convert attrs to cty value")
