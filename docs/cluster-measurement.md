@@ -613,3 +613,182 @@ The first two - ~20 MiB - exist only because a single-family binary links every
 API group. **Per-family API packages are now the single largest remaining item**,
 and at `GOGC=25` that ~20 MiB of live heap is ~25 MiB of pod memory, which lands
 the steady state in the mid-80s. Nothing else measured gets under 100.
+
+
+---
+
+# Rounds 5-9: the structural changes, measured
+
+Round 4 ended at 108 MiB steady and named two structural items as the only path
+below 100: per-family API packages and per-family linking. Both are now
+implemented behind environment variables, along with five smaller ones, and the
+answer is **76.6 MiB steady at 50 managed resources and 109.7 MiB at 500**.
+
+Every arm below carries the four settled levers from rounds 1-4 - trimmed or
+lazily-converted embeds, `UPJET_FAMILY_FILTER=s3`, `GODEBUG=disablethp=1`,
+`GOGC=25` - and adds one thing at a time.
+
+## The eight changes
+
+| knob | what it does | worth |
+| --- | --- | ---: |
+| trimmed fork | link 19 of 267 service packages, 17 of 266 SDK clients | **-26.4 steady** |
+| `UPJET_LAZY_CONVERT` | filter the resource map before `GetV2ResourceMap` | **-91.5 peak** |
+| `UPJET_CACHE_AWS_CLIENT` | reuse the configured AWS client across reconciles | **-59.6 at 500 MRs** |
+| `UPJET_STRIP_CACHE_METADATA` | drop `managedFields` + last-applied from the cache | **-29.5 at 500 MRs** |
+| `UPJET_SCHEME_FAMILY` | register 6 API groups instead of 178 | **-7.5 steady** |
+| `UPJET_SHARE_SCHEME` | one scheme, not two | -1.9 steady |
+| `UPJET_NO_LOG_SAMPLER` | drop controller-runtime's zapcore sampler | ~0 (see below) |
+| `UPJET_CLEAR_SCHEMAFUNC` | `docs/fixes/02` | ~0 (correctness, not memory) |
+
+### Per-family linking: measured on the real provider
+
+The fork's two generated registries root everything, and **both** must be
+trimmed. `service_packages_gen.go` roots `internal/service/*`;
+`awsclient_gen.go` imports the `aws-sdk-go-v2` clients for its 266 accessors'
+return types. Go initialises every imported package whether or not a symbol is
+reachable, so trimming only the first leaves every SDK client's `init` running.
+**`docs/memory-footprint.md` says `awsclient_gen.go` does not need to change -
+that holds for text, and not for `init`, which is where the heap is.**
+
+| | full fork | trimmed fork |
+| --- | ---: | ---: |
+| podMEM steady (50 MRs) | 123.9 | **97.5** |
+| resident text | 277.8 | **156.8** |
+| binary | 979,959,968 B | **332,333,216 B** |
+
+**-26.4 MiB of steady state, -121 MiB of resident text, and a binary 66%
+smaller** - the first end-to-end measurement of the per-family linking idea on a
+real provider rather than a synthetic `main`. It crosses under 100 MiB on its
+own.
+
+### Filtering the parse instead of trimming the file
+
+`GetV2ResourceMap` converts all 1,683 schemas before any include list is
+consulted; the loop then drops what is not kept. Filtering first, on stock
+embeds:
+
+| | idle | steady | peak | config build |
+| --- | ---: | ---: | ---: | ---: |
+| control | 104.5 | 123.9 | **248.7** | 1.162 s |
+| `UPJET_LAZY_CONVERT=1` | 102.7 | 120.6 | **157.2** | 0.963 s |
+
+**-91.5 MiB of startup peak from ~15 lines**, with no build step and no second
+copy of the blobs - about 85% of what the build-time trim achieved. If only one
+of the two ships, it should be this one.
+
+### The AWS client is rebuilt on every reconcile
+
+`configureNoForkAWSClient` constructs a fresh `*conns.AWSClient` per `Connect`,
+and `internal/conns/config.go:100` gives each one its own `HTTPClient` - so every
+reconcile gets a new `http.Transport` with an empty connection pool. The steady
+profile shows it: **56 MB per 3.3 minutes of `bufio` buffers under
+`Transport.dialConn`**, roughly 70 new connections a second for 50 buckets
+polling once a minute.
+
+Caching the configured client (measurement-only: no expiry, keyed on provider
+config, region and access key):
+
+| | 50 MRs | 500 MRs |
+| --- | ---: | ---: |
+| without | 82.9 | 169.3 |
+| with | **76.6** | **109.7** |
+
+**-6.3 MiB at 50 MRs and -59.6 MiB at 500** - it scales with reconcile volume,
+not resource count, which is why it barely registers on a small provider and
+dominates on a busy one. This is `docs/fixes/09`, and it is worth far more than
+the fix list suggests.
+
+### The informer cache holds what nothing reads
+
+Every cached object carries `metadata.managedFields` and the last-applied
+annotation. `cache.Options.DefaultTransform` can drop both on the way in - the
+same mechanism `TransformStripCRDSchema` already uses for CRDs:
+
+| 500 MRs | idle | steady | peak |
+| --- | ---: | ---: | ---: |
+| control | 107.5 | 246.0 | 436.7 |
+| stripped | 115.5 | **216.5** | **268.1** |
+
+**-59 KB per managed resource** and -168 MiB of peak. All 500 still reconcile.
+At 3,000 MRs that extrapolates to ~180 MiB.
+
+## Two nulls, and why
+
+`UPJET_NO_LOG_SAMPLER` and `UPJET_CLEAR_SCHEMAFUNC` moved nothing measurable.
+The sampler patch was **incomplete on the first attempt** - it replaced the
+provider's own logger while `main` sets controller-runtime's global logger
+earlier with its own `zap.New`, and that is the one that is retained. Clearing
+`SchemaFunc` remains worth shipping as a **correctness** fix (this repository's
+`config/` schema edits are otherwise invisible to every path except the diff),
+just not as a memory fix.
+
+The general lesson from rounds 3-9: **`alloc_space` ranks what to fix for speed,
+`inuse_space` ranks what to fix for footprint, and they disagree.** The three
+largest allocation sites moved the pod metric by nothing; the three largest
+*retained* structures moved it by 90 MiB.
+
+## Where the memory is now
+
+Live heap at 50 MRs is **27.5 MiB**, from 64.7 at the start of these rounds, and
+it is genuinely diffuse - nothing above 3 MiB, `Scheme.AddKnownTypeWithName` down
+from 5.75 to 1.10. At 500 MRs it is 52.1 MiB, so **56 KB per managed resource**,
+and that growth has a single dominant cause:
+
+| grew with MR count | 500-MR live heap |
+| --- | ---: |
+| `go-cty/cty.Object` | 10.24 MiB |
+| `cty.ObjectVal` | 6.15 MiB |
+| `schema.(*MapFieldWriter).setPrimitive` | 1.54 MiB |
+
+`external_tfpluginsdk.go:826` calls
+`n.config.TerraformResource.CoreConfigSchema().ImpliedType()` on every Observe,
+Create and Update, and the value it produces is retained per managed resource.
+The implied type is a pure function of the schema - there are 25 distinct ones
+in a filtered s3 provider, not 500. Memoising it is the same "one copy, not N"
+pattern as the AWS SDK's partition regexes.
+
+## Round 9: a null, and what it corrects
+
+`external_tfpluginsdk.go:826` rebuilds the implied cty type on every Observe,
+Create and Update, and `cty.Object`/`cty.ObjectVal` were 16.4 MiB of the 500-MR
+live heap - so memoising the type looked like the same "one copy, not N" win as
+the SDK partition regexes. **It moved nothing**: 113.3 against 113.6 MiB.
+
+That corrects the attribution. Those cty objects are mostly **in-flight reconcile
+state**, not structures retained per managed resource - `inuse_space` includes
+what has not been collected yet, and at 500 MRs there is a lot in flight. It also
+explains why caching the AWS client helped so much at 500 MRs and so little at
+50: what scales here is reconcile *volume*, not resource count.
+
+## Validation
+
+The eight changes stack, so the risk shifts from "is it smaller" to "is it still
+correct". On the fully-patched binary, with every knob on:
+
+* **create** - 500 buckets reach `Ready` in 102 s;
+* **a second kind** - a `BucketVersioning` (v1beta2, the storage version) reaches
+  `SYNCED=True READY=True`, and LocalStack independently reports
+  `"Status": "Enabled"`, so the change reached the API rather than only the
+  status;
+* **delete** - the managed resource *and* the bucket disappear, with a control
+  bucket left untouched.
+
+Two harness traps worth recording for whoever runs this next. `aws_s3_bucket`
+tags go through S3 Control, which this harness answers with a stub that accepts
+writes and returns an empty tag set - **tags cannot be used as an update test
+here**. And both CRDs store `v1beta2` with `conversion: None`, so a `v1beta1`
+manifest using the singleton-list shape is stored verbatim and never reconciles;
+submit the storage version.
+
+## Running total
+
+| | stock | best measured |
+| --- | ---: | ---: |
+| podMEM steady, 50 MRs | 382.2 | **76.6** |
+| podMEM steady, 500 MRs | 486.7 | **109.7** |
+| peak | 537.6 | **122.1** |
+| config build | 13.67 s | 0.86 s |
+| binary | 980 MB | 332 MB |
+
+**-80% steady, -77% peak, -94% startup, -66% image.**
