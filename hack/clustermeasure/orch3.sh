@@ -12,12 +12,14 @@ deploy_arm() {
   bin=provider
   mrs=50
   rate=10
+  psm=5s
   seccache=true
   for kv in "$@"; do
     k=$(echo "$kv" | cut -d= -f1); v=$(echo "$kv" | cut -d= -f2-)
     if [ "$k" = "BIN" ]; then bin="$v"; continue; fi
     if [ "$k" = "MRS" ]; then mrs="$v"; continue; fi
     if [ "$k" = "RATE" ]; then rate="$v"; continue; fi
+    if [ "$k" = "PSM" ]; then psm="$v"; continue; fi
     if [ "$k" = "SECCACHE" ]; then seccache="$v"; continue; fi
     if [ "$k" = "PODLIMIT" ]; then
       lim="        resources:
@@ -49,7 +51,7 @@ spec:
       - name: provider
         image: alpine:3.22
         command: ["/opt/provider/${bin}"]
-        args: ["--certs-dir=", "--poll=1m", "--skip-default-tags", "--max-reconcile-rate=${rate}"]
+        args: ["--certs-dir=", "--poll=1m", "--skip-default-tags", "--max-reconcile-rate=${rate}", "--poll-state-metric=${psm}"]
         env:
         - name: ENABLE_SECRET_CACHE
           value: "${seccache}"

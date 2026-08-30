@@ -251,27 +251,15 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 		LeaderElectionID: "crossplane-leader-election-provider-aws-s3",
 		Cache: cache.Options{
 			SyncPeriod: syncInterval,
-			// Every cached managed resource carries two things no reconciler
-			// reads: metadata.managedFields, which for a server-side-applied
-			// object is often larger than the spec, and the last-applied
-			// annotation, which is a second copy of the object. The informer
-			// cache holds one per MR, so this scales with the installation.
+			// controller-runtime ships this helper and its DefaultTransform doc
+			// recommends exactly this use. Strip managedFields only: stripping the
+			// last-applied annotation would delete it on the server for any object
+			// written back from cache, breaking kubectl apply's three-way merge.
 			DefaultTransform: func(i any) (any, error) {
 				if os.Getenv("UPJET_STRIP_CACHE_METADATA") != "1" {
 					return i, nil
 				}
-				o, ok := i.(metav1.Object)
-				if !ok {
-					return i, nil
-				}
-				o.SetManagedFields(nil)
-				if a := o.GetAnnotations(); a != nil {
-					if _, found := a[corev1.LastAppliedConfigAnnotation]; found {
-						delete(a, corev1.LastAppliedConfigAnnotation)
-						o.SetAnnotations(a)
-					}
-				}
-				return i, nil
+				return cache.TransformStripManagedFields()(i)
 			},
 			ByObject: map[client.Object]cache.ByObject{
 				&apiextensionsv1.CustomResourceDefinition{}: {

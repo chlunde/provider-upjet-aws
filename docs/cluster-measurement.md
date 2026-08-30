@@ -1060,3 +1060,54 @@ the flag did not land.
 | podMEM steady, 500 MRs | 486.7 | **78.1** |
 | CPU, 50 MRs | not measured | 34-42 mCPU |
 | binary | 980 MB | 332 MB |
+
+
+---
+
+# Round 12: the CPU profile, and a correction to my own recommendation
+
+Round 11 added a CPU column. This round takes the first actual CPU profile, and
+it overturns the `GOGC=25` advice given in round 2.
+
+## 61% of the provider's CPU is garbage collection
+
+`/debug/pprof/profile?seconds=60` against the soak pod (500 managed resources,
+every knob on, steady state) — the first CPU profile taken in this whole
+investigation:
+
+| | share of CPU |
+| --- | ---: |
+| `runtime.gcBgMarkWorker` | **61.3%** |
+| all reconcile work (`managed.Reconcile` and below) | 21.6% |
+| &nbsp;&nbsp;of which `terraformPluginSDKExternal.Observe` | 15.9% |
+| &nbsp;&nbsp;of which `schemaMap.Diff` (the per-Observe schema deep copy) | 11.1% |
+
+`GOGC=25` was chosen in round 2 against a **230 MiB** steady state. Live heap is
+now **27.5 MiB**, so the collector runs almost continuously to defend a goal that
+is trivial to meet, and the provider spends most of its CPU marking.
+
+## Pricing the trade
+
+Same binary, 500 managed resources, `--max-reconcile-rate=10` verified in `args`:
+
+| `GOGC` | podMEM steady | CPU | peak |
+| --- | ---: | ---: | ---: |
+| 25 | **82.2** | 182 mCPU | 125.6 |
+| 50 | 95.3 | **124 mCPU** | 146.0 |
+| 100 + `GOMEMLIMIT=120MiB` | 113.2 | **103 mCPU** | 120.1 |
+
+25 → 100 costs **+31 MiB** and returns **−43% CPU**. The knee is at **`GOGC=50`**:
+73% of the CPU saving for 42% of the memory cost. `GOMEMLIMIT` still does its
+separate job — it is what holds the peak down (120.1 with it, 146.0 without).
+
+**Revised recommendation: `GOGC=50` with `GOMEMLIMIT` as the ceiling**, not
+`GOGC=25`. Round 2's advice was measured against a footprint that no longer
+exists, and it was never priced in CPU because nothing measured CPU until round
+11. Anyone quoting the round-2 numbers should quote this table instead.
+
+The second-largest single item, `schemaMap.Diff` at 11.1%, is
+`helper/schema.Diff` calling `m.DeepCopy()` — a reflection walk of the whole
+resource schema — on every Observe because the tags interceptor installs a
+`customizeDiff`. That is a genuine upstream target in terraform-plugin-sdk, and
+unlike the churn fixes of round 3 it would show up in the CPU column rather than
+the memory one.

@@ -415,7 +415,15 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 		if creds.CanExpire {
 			exp = creds.Expires.Unix()
 		}
-		cacheKey = pc.GetName() + "|" + region + "|" + creds.AccessKeyID + "|" + strconv.FormatInt(exp, 10)
+		// Key on the ProviderConfig's UID and generation, not its name: the
+		// effective provider config is rebuilt without a namespace
+		// (pc_resolver.go), so two namespaced ProviderConfigs both called
+		// "default" with the same credentials and region would otherwise share a
+		// client and one tenant would get the other's endpoint or path-style
+		// setting. Generation invalidates the entry when the spec is edited,
+		// which credential expiry alone would not do for static keys.
+		cacheKey = string(pc.GetUID()) + "|" + strconv.FormatInt(pc.GetGeneration(), 10) +
+			"|" + region + "|" + creds.AccessKeyID + "|" + strconv.FormatInt(exp, 10)
 		awsClientCacheMu.Lock()
 		// Evict anything whose credentials have expired; entries are keyed by
 		// expiry so this bounds the map rather than letting rotations grow it.

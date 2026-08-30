@@ -79,8 +79,8 @@ accept a permanent cost for someone else's measurement.
 
 | what | impact | complexity | likelihood |
 | --- | --- | --- | --- |
-| Precompile the include/skip regexes in `matches()` ([patch](../../hack/clustermeasure/upjet-measurement.patch)) | 575 MB of allocation, 32% of the total; config build 688 ms → 250 ms (2.7×), and 12.96 s → 7.48 s unfiltered. **No memory change.** | ~20 lines, one file, identical semantics | **high** |
-| Filter the resource map before `GetV2ResourceMap` converts it | **−91.5 MiB of startup peak** — the peak sets the pod's memory limit | ~15 lines, reorders `NewProvider`; changes `GetSkippedResourceNames` semantics (skipped names never enter the map) | **high**, with a note about the semantics |
+| Precompile the include/skip regexes in `matches()` ([patch](../../hack/clustermeasure/upjet-measurement.patch)) | 575 MB of allocation, 32% of the total; config build 688 ms → 250 ms (2.7×), and 12.96 s → 7.48 s unfiltered. **No memory change.** | ~20 lines, one file, identical semantics. **Send it as local compiled slices, not the measured form** — every caller is inside `NewProvider`, so a package-global `sync.Map` retains ~3,000 compiled regexes for the process lifetime and contradicts the "no memory change" framing | **high** |
+| Filter the resource map before `GetV2ResourceMap` converts it | **−91.5 MiB of startup peak** — the peak sets the pod's memory limit | ~15 lines, reorders `NewProvider`. The `GetSkippedResourceNames` change is **avoidable**: record the skipped names from the pre-filter key set and the semantics are preserved bit-for-bit. Stack it on the precompile, which it depends on | **high** |
 | Clear `SchemaFunc` after materialising `Schema` (fix 02) | correctness — `config/` schema edits are otherwise invisible to every path except the diff. **No memory or CPU effect** (measured; do not pitch it as one) | 1 line, branched | high |
 | Don't parse `schema.json`/`provider-metadata.yaml` for a non-generation provider | would remove the parse entirely | large — ~368 configurators index `MetaResource` and panic without it; needs the configurator chain split into generation and runtime halves | low |
 
@@ -88,13 +88,13 @@ accept a permanent cost for someone else's measurement.
 
 | what | impact | complexity | likelihood |
 | --- | --- | --- | --- |
-| Guard the request/response decomposition on the logger's level | **−24% of provider CPU** at 50 and 500 MRs alike. `HandleDeserialize` decomposes every request — reading the whole body — then hands it to `logger.Debug`, which discards it. No level check exists (`logger.go:113`) | small, one middleware | medium-high |
+| Guard the request/response decomposition on the logger's level | **−24% of provider CPU** at 50 and 500 MRs alike. `HandleDeserialize` decomposes every request — reading the whole body — then hands it to `logger.Debug`, which discards it. No level check exists (`logger.go:135`) | **file an issue, not a patch**: tflog exposes no level query, which is presumably why the guard is at install time. Let them choose between a null-logger short-circuit and a level API | medium |
 
 ### aws-sdk-go-v2
 
 | what | impact | complexity | likelihood |
 | --- | --- | --- | --- |
-| Share the partition region regexes ([analysis](https://github.com/chlunde/notes/tree/main/aws-sdk-go-v2/endpoint-partition-regexes)) | **−8.6 MiB on the pod**, 2,152 compiled regexes → 8, byte-identical in 60 of 60 packages sampled | codegen only, and `internal/endpoints/v2` is already imported by every service — but it is a **separately versioned module**, so this bumps a minimum version across ~270 independently released service modules | medium-low — expect the module-versioning objection first |
+| Share the partition region regexes ([analysis](https://github.com/chlunde/notes/tree/main/aws-sdk-go-v2/endpoint-partition-regexes)) | **−8.6 MiB on the pod**, 2,152 compiled regexes → 8, byte-identical in 60 of 60 packages sampled | **File as an issue, not a patch** — the generator is Java (smithy codegen), so an outsider diff across 268 generated files is unmergeable by construction. `internal/endpoints/v2` is already in every service's dependency graph, but is separately versioned, so this bumps a minimum across ~270 modules — say so first. Note it only matters for whole-SDK linkers | medium-low |
 
 ### terraform-provider-aws (the Upbound fork)
 
@@ -107,12 +107,12 @@ accept a permanent cost for someone else's measurement.
 | what | impact | complexity | likelihood |
 | --- | --- | --- | --- |
 | Recommend `GODEBUG=disablethp=1` (or node `transparent_hugepage=madvise`) | **−47% of what the pod is charged** | zero code — a runtime-configuration and docs change | **high** |
-| Set `SuppressDebugLog` when Terraform logging is off | **−24% CPU** | 1 line | **high** |
+| Set `SuppressDebugLog` **unconditionally** | **−24% CPU** | 1 line. Neither upjet nor this provider ever configures a tflog sink, so that Debug output is *unreachable* in this binary — not merely off by default. That is the sentence that makes it unobjectionable | **high** |
 | Scope the Secret informer (fix 11, already branched) | **14.2 MiB per 5,000 Secrets in the cluster** (~2.9 KB each, whether read or not) — now a measured number rather than an estimate | branched | **high** |
-| Cache the configured AWS client across reconciles (fix 09) | **−44.7 MiB at 500 managed resources**, −21 mCPU; scales with reconcile volume | ~30 lines; must key on credential identity **and expiry** — no auth change needed, because the client is handed materialised credential values | medium-high |
-| Strip `managedFields` from the informer cache | **−59 KB per managed resource**, −168 MiB of peak at 500 | ~10 lines, but must **not** strip the last-applied annotation (writes derived from cache would delete it server-side) and must be scoped with `ByObject`, not `DefaultTransform` | medium-high |
-| Per-family include list (`UPJET_FAMILY_FILTER`) | −20% steady, −20% peak, 13.7 s → 1.1 s startup | codegen; the one imperative `ShortGroup` is now mirrored and guarded by a test | medium-high |
-| Family-scoped scheme registration | −4.5 MiB | codegen — **must be generated**: a hand-picked closure broke cross-group reference resolution, verified in-cluster | medium |
+| Cache the configured AWS client across reconciles (fix 09) | **−44.7 MiB at 500 managed resources**, −21 mCPU; scales with reconcile volume | ~30 lines. Key on **ProviderConfig UID + generation**, region, credential identity and expiry: the effective provider config is rebuilt without a namespace, so keying on *name* lets two namespaced configs called `default` share a client, and generation is what invalidates on a spec edit. No auth change needed — the client is handed materialised credential values | medium-high |
+| Strip `managedFields` from the informer cache | **−59 KB per managed resource** (~50 KB is better supported), −168 MiB of peak at 500 | **one line**: `DefaultTransform: cache.TransformStripManagedFields()`. controller-runtime ships the helper and its `DefaultTransform` doc recommends exactly this use (`pkg/cache/cache.go:219-224,470-483`). Belongs in `config/templates/main.go.tmpl`, not one `zz_main.go`. Must **not** also strip the last-applied annotation — writes derived from cache would delete it server-side | **high** |
+| Per-family include list | −20% steady, −20% peak, 13.7 s → 1.1 s startup | codegen. **Do not ship the env var as the interface** — the family is known when `zz_main.go` is generated, so pass it through code and let the monolith pass nothing. The one imperative `ShortGroup` is mirrored and guarded by a test. Webhook conversion under the filter is still unverified | medium-high, after a design nod |
+| Family-scoped scheme registration | −4.5 MiB — the worst impact-to-trap ratio in the set | codegen — **must be generated into a `zz_scheme.go`**, not pasted: a hand-picked closure broke cross-group reference resolution, verified in-cluster. Fold into the family-filter change or drop | low-medium |
 
 ### Corrections to the sections above, from cluster evidence
 
