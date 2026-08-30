@@ -926,3 +926,137 @@ The two results worth taking upstream are unaffected by everything above, becaus
 both were measured single-variable on one binary within one matrix: **transparent
 huge pages inflating what the pod is charged**, and **not converting the 1,559
 resource schemas the include list is about to discard**.
+
+
+---
+
+# Round 11: a CPU baseline, and acting on the review
+
+Round 10 recorded what review found. This round fixes it, adds the measurement
+axis that was missing, and works through the loose ends. Every arm here runs at a
+**verified** `--max-reconcile-rate=10` - the pod's rendered `args` are checked
+after each launch, because two more flag-plumbing defects turned up while doing it
+(see the end).
+
+## A CPU baseline, at last
+
+Every number in rounds 1-10 was memory. The sampler now also reads the
+container cgroup's `cpu.stat`, and `analyze.py` reports milli-cores per arm. That
+matters because the last several findings were CPU wins asserted from allocation
+counts rather than measured.
+
+## The AWS SDK decomposes every request for a log nobody reads
+
+`aws-sdk-go-base` installs a Deserialize middleware that builds the request,
+calls `DecomposeHTTPRequest` - **reading the whole request body** - and hands the
+result to `logger.Debug`, which discards it unless Terraform logging is on.
+**There is no level check anywhere in that path** (`logger.go:113`); the only
+guard is `SuppressDebugLog`, at middleware-*install* time
+(`aws_config.go:389`), which this provider never sets.
+
+| | steady podMEM | CPU |
+| --- | ---: | ---: |
+| control, 50 MRs | 76.7 | 47 mCPU |
+| `SuppressDebugLog`, 50 MRs | 74.1 | **36 mCPU** |
+| control, 500 MRs | 112.1 | 232 mCPU |
+| `SuppressDebugLog`, 500 MRs | 109.4 | **176 mCPU** |
+
+**-24% CPU at both scales**, memory unchanged inside noise - the round-3 lesson
+holding exactly. Two fixes: one line downstream to stop installing the
+middleware, and an upstream guard on the logger's level before decomposing.
+
+## The Secret informer, finally measured with Secrets present
+
+Every family pod starts a cluster-wide, selector-less `v1.Secret` informer.
+`docs/architecture-wins.md` priced this at "80-120 MB per pod" and could never
+measure it, because the harness cluster had one Secret. With **5,000 Secrets**
+loaded:
+
+| 50 MRs, 5,000 Secrets | idle | steady | CPU |
+| --- | ---: | ---: | ---: |
+| secret cache on (default) | 58.2 | **64.3** | 30 mCPU |
+| secret cache off | 45.2 | **50.1** | 35 mCPU |
+
+**-14.2 MiB for +5 mCPU**, i.e. **~2.9 KB per Secret in the cluster**, whether or
+not the provider ever reads it. At 50,000 Secrets that is ~145 MiB per provider
+pod, multiplied by every family pod installed. The flag is the workaround;
+scoping the informer (the `fix/scope-secret-informer` branch) is the fix.
+
+## The client cache, made shippable and properly controlled
+
+Review was right that the -59.6 MiB figure was cross-binary on a declining
+window. Re-run **same-binary, single-variable**:
+
+| v11, 500 MRs, rate=10 | steady | CPU |
+| --- | ---: | ---: |
+| no client cache | 122.8 | 215 mCPU |
+| client cache | **78.1** | 194 mCPU |
+
+**-44.7 MiB (-36%)**, which is close to review's -48 to -50 estimate and well
+short of my -59.6.
+
+The cache is now shippable, and it needs **no change to how credentials are
+resolved**. `configureNoForkAWSClient` is handed *materialised* credential values
+(`aws.go:357-365`), not a live provider - so even under IRSA or Pod Identity the
+constructed client holds static, expiring keys. Keying the cache on the
+credentials' identity **and expiry**, and sweeping expired entries, means a
+rotation naturally produces a new client: the existing
+`AWSCredentialsProviderCache` re-retrieves, `AccessKeyID` and `Expires` change,
+and the key changes with them.
+
+## The hand-picked scheme closure was broken, exactly as review predicted
+
+Review read the generated resolvers and predicted that `UPJET_SCHEME_FAMILY`'s
+hand-written 10-group list would fail on a cross-group reference, and that no arm
+could have caught it. Both were right. A `BucketMetric` referencing an
+`s3control` `AccessPoint`:
+
+```
+UPJET_SCHEME_FAMILY=1  Synced=False: cannot resolve references: failed to get a new
+   API object of GVK "s3control.aws.upbound.io/v1beta2, Kind=AccessPoint" from the
+   runtime scheme: no kind "AccessPoint" is registered for that version
+knob off               Synced=False: referenced field was empty (referenced resource
+   may not yet be ready)      <- the expected behaviour
+```
+
+The fix is the one this repository's own documents recommend: **derive the
+closure, do not write it**. `hack/clustermeasure/gen-family-scheme.py` walks the
+family's `zz_generated.resolvers.go` files for literal
+`GetManagedResource("<group>", "<version>", ...)` calls and emits the
+registration list. For s3 it produces **16 registrations where the hand-written
+list had 10** - the missing ones being cluster `s3control v1beta2` and the
+namespaced `iam`, `kms`, `s3control`, `sns` and `sqs` groups. With the generated
+closure the same probe behaves identically to the control.
+
+Correctly registered, the family scheme is worth less than claimed:
+
+| v12, 50 MRs, same binary | steady | CPU |
+| --- | ---: | ---: |
+| all 178 groups | 55.2 | 39 mCPU |
+| generated 16-group closure | **50.7** | 34 mCPU |
+
+**-4.5 MiB**, not the -7.5 measured on the under-registered scheme.
+
+## Two more flag-plumbing defects
+
+Round 10's defect had siblings, and both were invisible in the arm definitions:
+
+* `RATE` and `SECCACHE` support existed only in a scratchpad copy of the
+  orchestrator, so arms generated from the committed one silently ran at the
+  default reconcile rate **again**.
+* `kingpin` rejects `--enable-secret-cache=true`; boolean flags take
+  `--flag`/`--no-flag`. The provider crash-looped with `unexpected true` until
+  the setting moved to its explicit `ENABLE_SECRET_CACHE` envar.
+
+The lesson is now procedure: **verify the pod's rendered `args` and its goroutine
+count after every launch**, since 1,540 goroutines means rate=10 and ~6,000 means
+the flag did not land.
+
+## Running total, all verified at rate=10
+
+| | stock (this branch) | best measured |
+| --- | ---: | ---: |
+| podMEM steady, 50 MRs | 382.2 | **50.1-50.7** |
+| podMEM steady, 500 MRs | 486.7 | **78.1** |
+| CPU, 50 MRs | not measured | 34-42 mCPU |
+| binary | 980 MB | 332 MB |

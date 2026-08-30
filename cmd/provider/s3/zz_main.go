@@ -53,16 +53,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	clusterapis "github.com/upbound/provider-aws/v2/apis/cluster"
-	clusteriamv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/iam/v1beta1"
-	clusterkmsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/kms/v1beta1"
-	clusters3v1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/s3/v1beta1"
-	clusters3v1beta2 "github.com/upbound/provider-aws/v2/apis/cluster/s3/v1beta2"
-	clusters3controlv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/s3control/v1beta1"
-	clustersnsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/sns/v1beta1"
-	clustersqsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/sqs/v1beta1"
-	clusterpcv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/v1beta1"
+	cliamv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/iam/v1beta1"
+	clkmsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/kms/v1beta1"
+	cls3v1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/s3/v1beta1"
+	cls3v1beta2 "github.com/upbound/provider-aws/v2/apis/cluster/s3/v1beta2"
+	cls3controlv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/s3control/v1beta1"
+	cls3controlv1beta2 "github.com/upbound/provider-aws/v2/apis/cluster/s3control/v1beta2"
+	clsnsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/sns/v1beta1"
+	clsqsv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/sqs/v1beta1"
+	clpcv1beta1 "github.com/upbound/provider-aws/v2/apis/cluster/v1beta1"
 	namespacedapis "github.com/upbound/provider-aws/v2/apis/namespaced"
-	nss3v1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/s3/v1beta1"
+	naiamv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/iam/v1beta1"
+	nakmsv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/kms/v1beta1"
+	nas3v1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/s3/v1beta1"
+	nas3controlv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/s3control/v1beta1"
+	nasnsv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/sns/v1beta1"
+	nasqsv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/sqs/v1beta1"
 	nspcv1beta1 "github.com/upbound/provider-aws/v2/apis/namespaced/v1beta1"
 	config "github.com/upbound/provider-aws/v2/config"
 	resolverapis "github.com/upbound/provider-aws/v2/internal/apis"
@@ -194,12 +200,21 @@ func main() { //nolint:gocyclo // easier to follow as a unit
 	if os.Getenv("UPJET_SCHEME_FAMILY") == "1" {
 		// Only the groups this family's controllers and resolvers instantiate.
 		for _, add := range []func(*runtime.Scheme) error{
-			clusters3v1beta1.AddToScheme, clusters3v1beta2.AddToScheme,
-			clusteriamv1beta1.AddToScheme, clusterkmsv1beta1.AddToScheme,
-			clusters3controlv1beta1.AddToScheme, clustersnsv1beta1.AddToScheme,
-			clustersqsv1beta1.AddToScheme,
-			clusterpcv1beta1.SchemeBuilder.AddToScheme,
-			nss3v1beta1.AddToScheme,
+			cliamv1beta1.AddToScheme,
+			clkmsv1beta1.AddToScheme,
+			cls3v1beta1.AddToScheme,
+			cls3v1beta2.AddToScheme,
+			cls3controlv1beta1.AddToScheme,
+			cls3controlv1beta2.AddToScheme,
+			clsnsv1beta1.AddToScheme,
+			clsqsv1beta1.AddToScheme,
+			naiamv1beta1.AddToScheme,
+			nakmsv1beta1.AddToScheme,
+			nas3v1beta1.AddToScheme,
+			nas3controlv1beta1.AddToScheme,
+			nasnsv1beta1.AddToScheme,
+			nasqsv1beta1.AddToScheme,
+			clpcv1beta1.SchemeBuilder.AddToScheme,
 			nspcv1beta1.SchemeBuilder.AddToScheme,
 		} {
 			kingpin.FatalIfError(add(scheme), "Cannot add family API group to scheme")
