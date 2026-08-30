@@ -633,7 +633,60 @@ with LocalStack independently confirming the change reached the API, and deletio
 managed resource and the bucket.</p>
 </div>
 
-<h2>10 / What to do</h2>
+
+<h2>10 / What review found</h2>
+<p class="h2sub">A dead flag, ten binaries, and where the precision outran the design</p>
+
+<div class="callout col">
+  <span class="label">The defect</span>
+  <p><code>kingpin.New(filepath.Base(os.Args[0])).DefaultEnvars()</code> derives environment-variable
+  names from the <em>binary's basename</em>, and the harness runs <code>/opt/provider/&lt;name&gt;</code>.
+  So <code>PROVIDER_MAX_RECONCILE_RATE</code> was ignored in every arm from round 2 on, and those arms
+  ran at the default rate of <strong>100</strong> while this page said 10. Same applies to
+  <code>--poll-state-metric</code> and <code>--enable-secret-cache</code>.</p>
+</div>
+
+<div class="tablewrap" style="margin: 24px 0 8px; max-width: 820px;">
+<table>
+  <thead><tr><th>one binary, only the rate differs</th><th>idle</th><th>steady</th><th>peak</th><th>goroutines</th><th>stacks</th></tr></thead>
+  <tbody>
+    <tr><td>rate=100 (rounds 2&ndash;9)</td><td>72.1</td><td>80.3</td><td>212.8</td><td>6,042</td><td>26.3</td></tr>
+    <tr class="hi"><td>rate=10 (as documented)</td><td class="pos">50.7</td><td class="pos">56.2</td><td>212.8</td><td>1,540</td><td class="pos">7.0</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="col">
+<p>The best figures therefore <em>improve</em> &mdash; to <strong>56.2&nbsp;MiB at 50 managed
+resources and 84.9 at 500</strong> &mdash; for an embarrassing reason: the measured configuration was
+not the documented one. The two arms that existed to measure the reconcile rate compared 100 with
+100, and the <code>--poll-state-metric</code> null is vacuous.</p>
+
+<h3>Corrections</h3>
+<ul class="plain">
+  <li><strong>Ten binaries, not one.</strong> "Arms differ only by environment variable" holds for
+  round 1 only; several later deltas are cross-binary, and cross-generation drift is 3&ndash;6% &mdash;
+  so every delta under ~10&nbsp;MiB is inside noise.</li>
+  <li><strong>"Peak halves, 380&nbsp;&rarr;&nbsp;175" mixes definitions.</strong> 174.7 is the
+  startup spike; the whole-run peak is 248.3, so the honest cut is &minus;37%.</li>
+  <li><strong>The 122.1 best peak is contradicted by its own repeat</strong> (v9 peaks ~210) and
+  should not be quoted.</li>
+  <li><strong>The client cache at 500 MRs is &minus;48 to &minus;50</strong>, not &minus;59.6 &mdash;
+  that comparison was cross-binary on a still-declining window.</li>
+  <li><strong>"Stock" is this branch</strong>, which already drops the codegen-only metadata.</li>
+  <li><strong>Three patches are not shippable as written:</strong> the family-scheme closure misses
+  kinds the generated resolvers reach and no arm ever resolved a cross-group reference; the cache
+  transform would delete the last-applied annotation server-side and applies to every informer; the
+  AWS client cache has no expiry.</li>
+</ul>
+
+<p>The two findings worth taking upstream survive all of it, because both were measured
+single-variable on one binary inside one matrix: <strong>transparent huge pages inflating what the
+pod is charged</strong>, and <strong>not converting the 1,559 schemas the include list is about to
+discard</strong>.</p>
+</div>
+
+<h2>11 / What to do</h2>
 <p class="h2sub">Ranked by measured effect on the pod metric</p>
 
 <ol class="rec">
@@ -706,7 +759,7 @@ managed resource and the bucket.</p>
   </li>
 </ol>
 
-<h2>11 / Scope</h2>
+<h2>12 / Scope</h2>
 <p class="h2sub">What this does not cover</p>
 
 <div class="col">
