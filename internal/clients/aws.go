@@ -6,10 +6,10 @@ package clients
 
 import (
 	"context"
+	"crypto/sha256"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -98,6 +98,10 @@ var globalGroups = map[string]string{
 
 func SelectTerraformSetup(config *SetupConfig) terraform.SetupFn { // nolint:gocyclo
 	credsCache := NewAWSCredentialsProviderCache(WithCacheLogger(config.Logger))
+	var clientCache *awsClientCache
+	if os.Getenv("UPJET_DISABLE_AWS_CLIENT_CACHE") != "1" {
+		clientCache = newAWSClientCache()
+	}
 	return func(ctx context.Context, c client.Client, mg resource.Managed) (terraform.Setup, error) {
 		pc, err := resolveProviderConfig(ctx, c, mg)
 		if err != nil {
@@ -161,7 +165,7 @@ func SelectTerraformSetup(config *SetupConfig) terraform.SetupFn { // nolint:goc
 		if config.TerraformProvider == nil {
 			return terraform.Setup{}, errors.New("terraform provider cannot be nil")
 		}
-		return ps, errors.Wrap(configureNoForkAWSClient(ctx, &ps, config, awsCfg.Region, credCache.creds, pc), "could not configure the no-fork AWS client")
+		return ps, errors.Wrap(configureNoForkAWSClient(ctx, &ps, config, awsCfg.Region, credCache.creds, pc, clientCache), "could not configure the no-fork AWS client")
 	}
 }
 
@@ -348,15 +352,86 @@ func withExternalAPICallCounter(stack *middleware.Stack) error {
 // configureNoForkAWSClient populates the supplied *terraform.Setup with
 // Terraform Plugin SDK style AWS client (Meta) and Terraform Plugin Framework
 // style FrameworkProvider
-// awsClientCache reuses a configured AWS client across reconciles. The entry
-// is a closure so this needs no import of the framework provider's type.
-var (
-	awsClientCacheMu    sync.Mutex
-	awsClientCache      = map[string]func(*terraform.Setup){}
-	awsClientCacheSwept int64
-)
+// awsClientCacheKey identifies a configured client. It carries the
+// ProviderConfig's UID and generation rather than its name: resolveProviderConfig
+// rebuilds the effective config without a namespace, so two namespaced
+// ProviderConfigs both called "default" would otherwise share a client - one
+// tenant getting the other's endpoint or path-style setting - and generation is
+// what invalidates the entry when a spec is edited. The credential digest covers
+// the whole triple, not just the access key ID: a rotated secret that reuses an
+// access key ID (which real AWS never does, but a local S3 implementation may)
+// would otherwise be served a stale secret forever.
+type awsClientCacheKey struct {
+	pcUID  string
+	pcGen  int64
+	region string
+	creds  [sha256.Size]byte
+}
 
-func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *SetupConfig, region string, creds aws.Credentials, pc *namespacedv1beta1.ClusterProviderConfig) error { //nolint:gocyclo
+type awsClientCacheEntry struct {
+	apply    func(*terraform.Setup)
+	expires  time.Time // zero for credentials that cannot expire
+	lastUsed atomic.Int64
+}
+
+// awsClientCache holds configured AWS clients between reconciles. Constructing
+// one per Connect gives every reconcile a fresh http.Transport with an empty
+// connection pool; measured at 500 managed resources, reusing them is worth
+// -44.7 MiB and -21 mCPU (docs/cluster-measurement.md round 11).
+//
+// The shared *conns.AWSClient is safe to hand to concurrent reconciles: its lazy
+// per-region client map is mutex-guarded upstream, per-request state travels in
+// the context, and the framework provider's Configure writes only to its
+// response. The one invariant is below - SetAccountID and AppendAPIOptions must
+// run before the entry is published.
+type awsClientCache struct {
+	mu        sync.Mutex
+	entries   map[awsClientCacheKey]*awsClientCacheEntry
+	lastSweep time.Time
+}
+
+// awsClientIdleTTL bounds entries whose credentials never expire. Every stale
+// class - retired generation, rotated static key, deleted ProviderConfig - is
+// unreachable rather than merely old, so idling out is the whole policy needed.
+const awsClientIdleTTL = 30 * time.Minute
+
+func newAWSClientCache() *awsClientCache {
+	return &awsClientCache{entries: map[awsClientCacheKey]*awsClientCacheEntry{}}
+}
+
+func (c *awsClientCache) get(k awsClientCacheKey, now time.Time) (*awsClientCacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[k]
+	if !ok || (!e.expires.IsZero() && now.After(e.expires)) {
+		return nil, false
+	}
+	e.lastUsed.Store(now.Unix())
+	return e, true
+}
+
+func (c *awsClientCache) put(k awsClientCacheKey, e *awsClientCacheEntry, now time.Time) {
+	e.lastUsed.Store(now.Unix())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[k] = e
+	if now.Sub(c.lastSweep) < time.Minute {
+		return
+	}
+	c.lastSweep = now
+	for key, entry := range c.entries {
+		expired := !entry.expires.IsZero() && now.After(entry.expires)
+		if expired || now.Unix()-entry.lastUsed.Load() > int64(awsClientIdleTTL/time.Second) {
+			delete(c.entries, key)
+		}
+	}
+}
+
+func credentialsDigest(creds aws.Credentials) [sha256.Size]byte {
+	return sha256.Sum256([]byte(creds.AccessKeyID + "\x00" + creds.SecretAccessKey + "\x00" + creds.SessionToken))
+}
+
+func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *SetupConfig, region string, creds aws.Credentials, pc *namespacedv1beta1.ClusterProviderConfig, clientCache *awsClientCache) error { //nolint:gocyclo
 	tfAwsConnsCfg := xpprovider.AWSConfig{
 		AccessKey:               creds.AccessKeyID,
 		Endpoints:               map[string]string{},
@@ -401,48 +476,23 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 	xpac := &xpprovider.AWSClient{}
 	xpac.SetServicePackagesField(p.(*xpprovider.AWSClient).GetServicePackages())
 
-	cacheKey := ""
-	if os.Getenv("UPJET_CACHE_AWS_CLIENT") == "1" {
-		// Key on everything that determines how the client is built, plus the
-		// credentials' identity and expiry. The provider hands this function
-		// materialised credential values (AccessKey/SecretKey/Token below), not
-		// a live provider - so even under IRSA or Pod Identity the client holds
-		// static, expiring keys, and a rotation must produce a new client. It
-		// does: the upstream AWSCredentialsProviderCache re-retrieves, the
-		// AccessKeyID and Expires change, and the key changes with them. No
-		// change to how credentials are resolved.
-		exp := int64(0)
-		if creds.CanExpire {
-			exp = creds.Expires.Unix()
+	var (
+		key    awsClientCacheKey
+		cached bool
+		now    = time.Now()
+	)
+	if clientCache != nil {
+		key = awsClientCacheKey{
+			pcUID:  string(pc.GetUID()),
+			pcGen:  pc.GetGeneration(),
+			region: region,
+			creds:  credentialsDigest(creds),
 		}
-		// Key on the ProviderConfig's UID and generation, not its name: the
-		// effective provider config is rebuilt without a namespace
-		// (pc_resolver.go), so two namespaced ProviderConfigs both called
-		// "default" with the same credentials and region would otherwise share a
-		// client and one tenant would get the other's endpoint or path-style
-		// setting. Generation invalidates the entry when the spec is edited,
-		// which credential expiry alone would not do for static keys.
-		cacheKey = string(pc.GetUID()) + "|" + strconv.FormatInt(pc.GetGeneration(), 10) +
-			"|" + region + "|" + creds.AccessKeyID + "|" + strconv.FormatInt(exp, 10)
-		awsClientCacheMu.Lock()
-		// Evict anything whose credentials have expired; entries are keyed by
-		// expiry so this bounds the map rather than letting rotations grow it.
-		if now := time.Now().Unix(); now > awsClientCacheSwept+60 {
-			awsClientCacheSwept = now
-			for k := range awsClientCache {
-				if i := strings.LastIndex(k, "|"); i >= 0 {
-					if e, err := strconv.ParseInt(k[i+1:], 10, 64); err == nil && e != 0 && e < now {
-						delete(awsClientCache, k)
-					}
-				}
-			}
-		}
-		if apply, ok := awsClientCache[cacheKey]; ok {
-			awsClientCacheMu.Unlock()
-			apply(ps)
+		cached = true
+		if e, ok := clientCache.get(key, now); ok {
+			e.apply(ps)
 			return nil
 		}
-		awsClientCacheMu.Unlock()
 	}
 
 	tfAwsConnsClient, diags := tfAwsConnsCfg.GetClient(ctx, xpac)
@@ -463,11 +513,16 @@ func configureNoForkAWSClient(ctx context.Context, ps *terraform.Setup, config *
 	// Register AWS SDK v2 call counter
 	tfAwsConnsClient.AppendAPIOptions(withExternalAPICallCounter)
 
-	if cacheKey != "" {
-		awsClientCacheMu.Lock()
+	if cached {
+		// Published only after SetAccountID and AppendAPIOptions above: the hit
+		// path never mutates the client, so this ordering is what makes sharing
+		// it across concurrent reconciles safe.
 		meta, fw := ps.Meta, ps.FrameworkProvider
-		awsClientCache[cacheKey] = func(s *terraform.Setup) { s.Meta = meta; s.FrameworkProvider = fw }
-		awsClientCacheMu.Unlock()
+		e := &awsClientCacheEntry{apply: func(s *terraform.Setup) { s.Meta = meta; s.FrameworkProvider = fw }}
+		if creds.CanExpire {
+			e.expires = creds.Expires
+		}
+		clientCache.put(key, e, now)
 	}
 
 	return nil
