@@ -19,8 +19,11 @@ Harness, raw samples and reproduction steps:
 
 * kind, one node, Docker Desktop on darwin/arm64, LinuxKit kernel 6.12.76.
 * `cmd/provider/s3` built from this tree (`claude/cluster-measure`), linux/arm64,
-  `-ldflags="-s -w"`, **980 MB stripped**. One binary for every arm; arms differ
-  only by environment variable, so link shape is constant.
+  `-ldflags="-s -w"`, **980 MB stripped**. One binary for every arm **in round 1**;
+  from round 2 onward there are ten binaries and several deltas are therefore
+  cross-binary - see [`hack/clustermeasure/BINARIES.md`](../hack/clustermeasure/BINARIES.md)
+  for which binary produced which arm, and [round 10](#round-10-what-review-found)
+  for which claims that invalidates.
 * Run as a plain Deployment with the s3 family's CRDs applied, `--poll=1m
   --max-reconcile-rate=10 --skip-default-tags`, against LocalStack.
 * Workload: 50 `s3.aws.upbound.io/v1beta1` `Bucket` MRs, all reaching
@@ -792,3 +795,134 @@ submit the storage version.
 | binary | 980 MB | 332 MB |
 
 **-80% steady, -77% peak, -94% startup, -66% image.**
+
+
+---
+
+# Round 10: what review found
+
+Two independent reviews were run over the raw samples, the orchestrators and the
+patches. They found a measurement defect that invalidates part of rounds 2-9, and
+several places where the write-up's precision outran its design. Everything below
+is a correction to this document, not to the provider.
+
+## The defect: three flags were never applied
+
+`cmd/provider/s3/zz_main.go:103` builds the flag set with
+`kingpin.New(filepath.Base(os.Args[0])).DefaultEnvars()`, so environment-variable
+names are derived from **the binary's basename**. The orchestrators run
+`/opt/provider/${bin}` with `bin` = `provider-trim2`, `provider-v5` … so the
+variable kingpin honours is `PROVIDER_V9_MAX_RECONCILE_RATE`, and the
+`PROVIDER_MAX_RECONCILE_RATE` the arms set was ignored. The same applies to
+`PROVIDER_POLL_STATE_METRIC` and `PROVIDER_ENABLE_SECRET_CACHE`.
+
+**Every arm from round 2 onward ran at `--max-reconcile-rate=100`**, the default,
+while this document said 10. Confirmed directly on the same binary, with the flag
+moved back into `args`:
+
+| v9, identical knobs, only the rate differs | idle | steady | peak | goroutines | stacks |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| rate=100 | 72.1 | 80.3 | 212.8 | 6,042 | 26.3 MiB |
+| rate=10 | **50.7** | **56.2** | 212.8 | 1,540 | 7.0 MiB |
+
+Three consequences:
+
+* **The best measured figures improve to 56.2 MiB steady at 50 managed resources
+  and 84.9 at 500** - every number in rounds 2-9 carries ~19 MiB of idle worker
+  stacks that the documented configuration would not have had.
+* **The two arms that existed to measure the reconcile rate compared rate=100
+  with rate=100** (`s100-rate10`, `s100-gogc25-rate2`). They measured nothing.
+  The "~22 MiB of stacks" figure in round 3 survives only as a cross-round
+  inference between round 1 (which passed the flag properly) and round 2.
+* **Round 3's `--poll-state-metric=30s` null is vacuous** - the setting never
+  changed. It should not be counted among the three allocation-site nulls.
+
+The rate does not affect peak (212.8 either way), so this defect does not touch
+any peak-based conclusion.
+
+## Corrections to earlier rounds
+
+**"One binary for every arm" is false from round 2.** Ten binaries were used.
+`BINARIES.md` now maps each. In particular the round 2 opener - "environment
+variables only" - is wrong: those arms ran `provider-trim2`, a rebuilt binary
+with trimmed embeds.
+
+**Two different definitions of "peak" appear in the round 2 table.** The
+`trimmed embeds` row quotes 174.7, which is the peak *at end of idle* - the
+startup spike. Its whole-run `memory.peak` is 248.3. So the honest statement is
+"the startup spike halves, 380 -> 175; whole-run peak falls 392 -> 248 (-37%)",
+not "peak halves". The `GOMEMLIMIT=200MiB` row in the same table is a whole-run
+peak, so the column mixes both.
+
+**The best-case peak of 122.1 should not be quoted.** The v9 arms with the same
+knobs peak at 209.9-213.9. Either v8 and v9 differ in a way not recorded, or
+peak has far wider run-to-run spread than steady state. Until that is explained,
+peak is only trustworthy where a single binary is compared with itself.
+
+**The client-cache delta at 500 MRs is smaller than stated.** The -59.6 MiB
+compares v7 with v8, and the 500-MR series was still declining inside its 150 s
+window; endpoint-to-endpoint the honest range is **-48 to -50 MiB**. The
+mechanism is confirmed same-binary at 50 MRs (`e8-ctrl` 82.9 -> `e8-cache` 76.6).
+The same caveat applies to `-59 KB per managed resource` for the cache strip:
+~50 KB is better supported, and the extrapolation to 3,000 MRs is not.
+
+**"Stock" is not upstream stock.** The 382.2 baseline is this branch, which
+applies `dropCodegenOnlyMetadata` unconditionally, with `--skip-default-tags`,
+no webhooks, and the executable's pages charged outside the pod. Upstream stock
+would be higher; the -80% headline compares a discounted baseline with a
+discounted best.
+
+**The noise band is wider than 3%.** Within-arm sampling noise is small, but
+same-configuration drift *across binary generations* is 3-6% (`e6-all` 86.0 vs
+`e7-all` 89.0; `e8-cache` 76.6 vs `e9-implied-50` 81.1). Deltas under ~10 MiB -
+share-scheme (-1.9), scheme-family (-7.5), client cache at 50 MRs (-6.3) - are at
+or inside that band and are single-run. Deltas above ~20 MiB (THP, the family
+filter, the embed trim, the fork trim, the lazy-convert peak) are safe.
+
+## Correctness problems in the patches
+
+**`UPJET_SCHEME_FAMILY`'s closure is incomplete.** The generated resolvers reach
+cluster `s3control.aws.upbound.io/v1beta2 AccessPoint` and the namespaced
+`iam`/`kms`/`s3control`/`sns`/`sqs` kinds; the patch registers cluster s3control
+v1beta1 only and, namespaced, only s3. With `UPJET_SHARE_SCHEME=1` also set the
+resolver shares that incomplete scheme, so cross-group reference resolution would
+fail. **No arm ever resolved a cross-group reference**, so the validation could
+not have caught it. The -7.5 MiB is therefore measured on an under-registered
+scheme.
+
+**`UPJET_STRIP_CACHE_METADATA` is not shippable as written.** Stripping
+`managedFields` from a cache is ordinary; stripping the last-applied annotation
+is not - anything written back from a cached object would delete that annotation
+on the server and break `kubectl apply` three-way merges. The transform is also
+installed as `DefaultTransform`, so it applies to Secrets and ProviderConfigs,
+not only managed resources. A shippable version strips `managedFields` only, and
+scopes itself with `ByObject`.
+
+**`UPJET_CACHE_AWS_CLIENT` has no expiry**, as its own comment says. With
+assume-role or IRSA credentials the cached client would go stale within the hour.
+The measured -48 to -59 MiB bounds a best case that a correct implementation,
+keyed on the full provider configuration and expiring with the credentials, may
+not reach.
+
+**The fork trim's service list is hand-picked** (22 entries in `trim-fork.py`),
+and only 2 of the family's 25 kinds were ever reconciled on the trimmed binary.
+"Still configures all 25 resources" is not "still works". A shippable version
+derives the closure from `config/<family>`.
+
+**`UPJET_LAZY_CONVERT` changes `GetSkippedResourceNames` semantics** - resources
+dropped by the include list never enter the map, so they are not reported as
+skipped. Harmless at runtime, worth a note upstream.
+
+## Revised headline
+
+| | stock (this branch) | best measured, rate=10 |
+| --- | ---: | ---: |
+| podMEM steady, 50 MRs | 382.2 | **56.2** |
+| podMEM steady, 500 MRs | 486.7 | **84.9** |
+| config build | 13.67 s | 1.35 s |
+| binary | 980 MB | 332 MB |
+
+The two results worth taking upstream are unaffected by everything above, because
+both were measured single-variable on one binary within one matrix: **transparent
+huge pages inflating what the pod is charged**, and **not converting the 1,559
+resource schemas the include list is about to discard**.
