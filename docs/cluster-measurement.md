@@ -1111,3 +1111,38 @@ resource schema — on every Observe because the tags interceptor installs a
 `customizeDiff`. That is a genuine upstream target in terraform-plugin-sdk, and
 unlike the churn fixes of round 3 it would show up in the CPU column rather than
 the memory one.
+
+
+## Round 12b: the state-metrics poller is a genuine null, and a noise band worth having
+
+Round 3's `--poll-state-metric=30s` result was vacuous — the flag never reached
+the process. Re-run with it verified in `args`, at 500 managed resources,
+`GOGC=50`, same binary:
+
+| | steady | CPU |
+| --- | ---: | ---: |
+| `--poll-state-metric=5s` (the default) | 95.5 | 126 mCPU |
+| `--poll-state-metric=60s` | 95.1 | 126 mCPU |
+
+**No effect on either axis.** The mechanism looked convincing — every generated
+controller starts its own `MRStateRecorder`, and each ticks a `client.List`
+against the informer cache, which deep-copies every object of that kind — but at
+500 managed resources it does not show up. Refuted, not deferred.
+
+### The same-binary noise band
+
+Three arms ran at an identical configuration (`gogc50-500`, `psm5-500`,
+`psm60-500`): **95.3 / 95.5 / 95.1 MiB** and **124 / 126 / 126 mCPU**. That is a
+±0.2 MiB spread, ~0.2%.
+
+So there are two noise bands, and they are an order of magnitude apart:
+
+* **same binary, same session, adjacent arms: ~0.2%** — deltas of 1-2 MiB are
+  real here;
+* **across binary generations: 3-6%** (review's measurement, from `e6-all` 86.0
+  vs `e7-all` 89.0 and `e8-cache` 76.6 vs `e9-implied-50` 81.1) — deltas under
+  ~10 MiB are not resolvable.
+
+Every conclusion in this document should be read against whichever band applies
+to how its arms were run. The rounds 11-12 results are same-binary throughout;
+most of rounds 5-9 are not.
